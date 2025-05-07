@@ -5,64 +5,63 @@ from collections import deque
 import signal
 import sys
 
-
 try:
     from smbus2 import SMBus
     SENSOR_AVAILABLE = True
 except ImportError:
-    print("SMBus2 라이브러리를 가져올 수 없습니다. 'pip install smbus2'를 실행하세요.")
+    print("Could not import SMBus2 library. Run 'pip install smbus2'.")
     SENSOR_AVAILABLE = False
 
-# MPU6050 I2C 설정
+# MPU6050 I2C settings
 DEV_ADDR = 0x68
 PWR_MGMT_1 = 0x6B
 
-# 자이로스코프 레지스터 주소
+# Gyroscope register addresses
 register_gyro_xout_h = 0x43
 register_gyro_yout_h = 0x45
 register_gyro_zout_h = 0x47
-sensitive_gyro = 131.0  # ±250°/s 범위에서 131 LSB/°/s
+sensitive_gyro = 131.0  # ±250°/s range: 131 LSB/°/s
 
-# 가속도계 레지스터 주소
+# Accelerometer register addresses
 register_accel_xout_h = 0x3B
 register_accel_yout_h = 0x3D
 register_accel_zout_h = 0x3F
-sensitive_accel = 16384.0  # ±2g 범위에서 16384 LSB/g
+sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 
-# 모델 설정
-MODEL_PATH = '/home/pi/Final_Project/data/models/tflite_model/fall_detection_method1.tflite'
-SEQ_LENGTH = 50  # 시퀀스 길이 
-STRIDE = 10      # 예측 간격 (매 10개 데이터마다 예측)
-N_FEATURES = 9   # 특징 수 (AccX, AccY, AccZ, GyrX, GyrY, GyrZ, EulerX, EulerY, EulerZ)
-SAMPLING_RATE = 100  # Hz
+# Model settings
+MODEL_PATH = 'fall_detection_method1.tflite'
+SEQ_LENGTH = 150  # Sequence length 
+STRIDE = 10      # Prediction interval (predict every 10 data points)
+N_FEATURES = 9   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ, EulerX, EulerY, EulerZ)
+SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
-# MPU6050 센서 클래스
+# MPU6050 sensor class
 class MPU6050Sensor:
     def __init__(self):
-        """실제 IMU 센서 (MPU6050) 초기화 및 I2C 설정"""
+        """Initialize IMU sensor (MPU6050) and I2C settings"""
         if not SENSOR_AVAILABLE:
-            raise ImportError("smbus2 라이브러리가 설치되어 있지 않습니다.")
+            raise ImportError("smbus2 library is not installed.")
         
-        self.bus = SMBus(1)  # I2C 버스 1 사용
+        self.bus = SMBus(1)  # Use I2C bus 1
         self.setup_mpu6050()
         self.frame_counter = 0
-        print("MPU6050 센서 초기화 완료")
+        print("MPU6050 sensor initialization complete")
     
     def setup_mpu6050(self):
-        """MPU6050 센서 초기 설정"""
-        # 전원 관리 설정 - 슬립 모드 해제
+        """MPU6050 sensor initial setup"""
+        # Power management setting - disable sleep mode
         self.bus.write_byte_data(DEV_ADDR, PWR_MGMT_1, 0)
-        time.sleep(0.1)  # 안정화 시간
+        time.sleep(0.1)  # Stabilization time
     
     def read_word(self, reg):
-        """16비트 워드 읽기 (2바이트)"""
+        """Read 16-bit word (2 bytes)"""
         high = self.bus.read_byte_data(DEV_ADDR, reg)
         low = self.bus.read_byte_data(DEV_ADDR, reg + 1)
         value = (high << 8) + low
         return value
     
     def read_word_2c(self, reg):
-        """2의 보수 값으로 변환"""
+        """Convert to 2's complement value"""
         val = self.read_word(reg)
         if val >= 0x8000:
             return -((65535 - val) + 1)
@@ -70,101 +69,101 @@ class MPU6050Sensor:
             return val
     
     def get_data(self):
-        """IMU 센서 데이터 읽기 - 모든 축의 가속도와 각속도"""
-        # 가속도계 데이터 (g 단위로 변환)
+        """Read IMU sensor data - all axes of accelerometer and gyroscope"""
+        # Accelerometer data (converted to g units)
         accel_x = self.read_word_2c(register_accel_xout_h) / sensitive_accel
         accel_y = self.read_word_2c(register_accel_yout_h) / sensitive_accel
         accel_z = self.read_word_2c(register_accel_zout_h) / sensitive_accel
         
-        # 자이로스코프 데이터 (°/s 단위로 변환)
+        # Gyroscope data (converted to °/s units)
         gyro_x = self.read_word_2c(register_gyro_xout_h) / sensitive_gyro
         gyro_y = self.read_word_2c(register_gyro_yout_h) / sensitive_gyro
         gyro_z = self.read_word_2c(register_gyro_zout_h) / sensitive_gyro
         
-        # 오일러 각도 계산 (단순화된 방법)
+        # Euler angle calculation (simplified method)
         accel_xangle = np.arctan2(accel_y, np.sqrt(accel_x**2 + accel_z**2)) * 180 / np.pi
         accel_yangle = np.arctan2(-accel_x, np.sqrt(accel_y**2 + accel_z**2)) * 180 / np.pi
         accel_zangle = np.arctan2(accel_z, np.sqrt(accel_x**2 + accel_y**2)) * 180 / np.pi
         
-        # 프레임 카운터 증가
+        # Increment frame counter
         self.frame_counter += 1
         
-        # 모든 데이터 반환
+        # Return all data
         return np.array([
             accel_x, accel_y, accel_z,
             gyro_x, gyro_y, gyro_z,
             accel_xangle, accel_yangle, accel_zangle
         ])
 
-# 낙상 감지기 클래스
+# Fall detector class
 class FallDetector:
     def __init__(self, model_path, seq_length=50, stride=10, n_features=9):
-        """낙상 감지 모델 초기화"""
+        """Initialize fall detection model"""
         self.seq_length = seq_length
         self.stride = stride
         self.n_features = n_features
         self.data_buffer = deque(maxlen=seq_length)
         self.alarm_active = False
-        self.data_counter = 0  # 데이터 카운터
+        self.data_counter = 0  # Data counter
         
-        # TFLite 모델 로드
+        # Load TFLite model
         self.interpreter = self.load_model(model_path)
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-        print("모델 로드 완료")
-        print(f"입력 형태: {self.input_details[0]['shape']}")
-        print(f"출력 형태: {self.output_details[0]['shape']}")
+        print("Model loading complete")
+        print(f"Input shape: {self.input_details[0]['shape']}")
+        print(f"Output shape: {self.output_details[0]['shape']}")
     
     def load_model(self, model_path):
-        """TFLite 모델 로드"""
+        """Load TFLite model"""
         try:
             interpreter = tflite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
             return interpreter
         except Exception as e:
-            print(f"모델 로드 중 오류 발생: {str(e)}")
+            print(f"Error loading model: {str(e)}")
             raise
     
     def add_data_point(self, data_array):
-        """데이터 버퍼에 새 데이터 포인트 추가"""
+        """Add new data point to the data buffer"""
         self.data_buffer.append(data_array)
         self.data_counter += 1
     
     def should_predict(self):
-        """예측을 수행해야 하는지 확인 (stride 간격에 따라)"""
-        # 버퍼가 가득 차있고, 데이터 카운터가 stride의 배수인 경우에만 예측
+        """Check if prediction should be performed (based on stride interval)"""
+        # Only predict when buffer is full and data counter is a multiple of stride
         return len(self.data_buffer) == self.seq_length and self.data_counter % self.stride == 0
     
     def predict(self):
-        """낙상 예측 수행"""
+        """Perform fall prediction"""
         try:
             if len(self.data_buffer) < self.seq_length:
-                return None  # 충분한 데이터가 없음
+                return None  # Not enough data
             
-            # 버퍼에서 데이터 추출 및 배열로 변환
+            # Extract data from buffer and convert to array
             data = np.array(list(self.data_buffer))
             
-            # 데이터 형태 맞추기 (배치 차원 추가)
+            # Adjust data shape (add batch dimension)
             input_data = np.expand_dims(data, axis=0).astype(np.float32)
             
-            # 모델 입력 설정
+            # Set model input
             self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
             
-            # 추론 실행
+            # Run inference
             self.interpreter.invoke()
             
-            # 결과 가져오기
+            # Get results
             output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
             
-            # 출력 형태에 따라 다르게 처리
+            # Process output based on shape
             if output_data.size == 1:
-                # 단일 값 출력인 경우
+                # Single value output
                 fall_prob = float(output_data.flatten()[0])
             else:
-                # 다차원 출력인 경우
+                # Multi-dimensional output
                 fall_prob = float(output_data[0][0])
             
-            # 예측 결과 (0: 정상, 1: 낙상)
+            # Prediction result (0: normal, 1: fall)
             prediction = 1 if fall_prob >= 0.5 else 0
             
             return {
@@ -172,11 +171,11 @@ class FallDetector:
                 'fall_probability': float(fall_prob)
             }
         except Exception as e:
-            print(f"예측 중 오류: {str(e)}")
+            print(f"Error during prediction: {str(e)}")
             return None
     
     def trigger_alarm(self):
-        """낙상 감지 시 NAKSANG 출력"""
+        """Display NAKSANG when fall is detected"""
         if not self.alarm_active:
             self.alarm_active = True
             print("\n" + "-" * 30)
@@ -184,25 +183,25 @@ class FallDetector:
             print("-" * 30 + "\n")
     
     def stop_alarm(self):
-        """알람 중지"""
+        """Stop alarm"""
         if self.alarm_active:
             self.alarm_active = False
-            print("알람 중지")
+            print("Alarm stopped")
 
 def main():
-    """메인 함수"""
-    print("낙상 감지 시스템 시작")
+    """Main function"""
+    print("Fall detection system starting")
     
     try:
-        # 센서 초기화
+        # Initialize sensor
         try:
             sensor = MPU6050Sensor()
         except Exception as e:
-            print(f"센서 초기화 실패: {e}")
-            print("프로그램을 종료합니다.")
+            print(f"Sensor initialization failed: {e}")
+            print("Terminating program.")
             return
         
-        # 낙상 감지기 초기화
+        # Initialize fall detector
         detector = FallDetector(
             model_path=MODEL_PATH,
             seq_length=SEQ_LENGTH,
@@ -210,67 +209,67 @@ def main():
             n_features=N_FEATURES
         )
         
-        # Ctrl+C 시그널 핸들러
+        # Ctrl+C signal handler
         def signal_handler(sig, frame):
-            print("\n프로그램 종료")
+            print("\nProgram terminated")
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
         
-        # 낙상 감지 루프
-        print("센서 데이터 수집 중...")
+        # Fall detection loop
+        print("Collecting sensor data...")
         
-        # 초기 데이터 버퍼 채우기
-        print(f"초기 데이터 버퍼 채우는 중 ({SEQ_LENGTH} 샘플)...")
+        # Fill initial data buffer
+        print(f"Filling initial data buffer ({SEQ_LENGTH} samples)...")
         for _ in range(SEQ_LENGTH):
             data = sensor.get_data()
             detector.add_data_point(data)
-            time.sleep(1.0 / SAMPLING_RATE)  # 100Hz 샘플링
+            time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
         
-        print("실시간 낙상 감지 시작")
+        print("Real-time fall detection started")
         
-        # 메인 감지 루프
+        # Main detection loop
         last_time = time.time()
         alarm_start_time = 0
         
         while True:
-            # 센서 데이터 읽기
+            # Read sensor data
             data = sensor.get_data()
             
-            # 디버그 출력 (1초마다)
+            # Debug output (once per second)
             current_time = time.time()
             if current_time - last_time >= 1.0:
-                print(f"가속도(g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
-                print(f"각속도(°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
+                print(f"Acceleration(g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
+                print(f"Gyroscope(°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
                 last_time = current_time
             
-            # 데이터 버퍼에 추가
+            # Add to data buffer
             detector.add_data_point(data)
             
-            # stride 간격에 따라 예측 수행
+            # Perform prediction based on stride interval
             if detector.should_predict():
-                # 낙상 예측
+                # Fall prediction
                 result = detector.predict()
                 
-                # 예측 결과가 있고 낙상으로 예측된 경우
+                # If result exists and fall is predicted
                 if result and result['prediction'] == 1:
-                    print(f"낙상 감지! 확률: {result['fall_probability']:.2%}")
+                    print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
                     detector.trigger_alarm()
                     alarm_start_time = current_time
             
-            # 알람이 활성화된 경우, 3초 후 자동으로 끄기
+            # Automatically turn off alarm after 3 seconds
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
                 detector.stop_alarm()
             
-            # 샘플링 속도 유지
+            # Maintain sampling rate
             sleep_time = 1.0 / SAMPLING_RATE - (time.time() - current_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
             
     except KeyboardInterrupt:
-        print("\n프로그램 종료")
+        print("\nProgram terminated")
     except Exception as e:
-        print(f"오류 발생: {str(e)}")
+        print(f"Error occurred: {str(e)}")
         import traceback
         traceback.print_exc()
 
