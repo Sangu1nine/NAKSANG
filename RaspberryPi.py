@@ -5,6 +5,7 @@ from collections import deque
 import signal
 import sys
 
+
 try:
     from smbus2 import SMBus
     SENSOR_AVAILABLE = True
