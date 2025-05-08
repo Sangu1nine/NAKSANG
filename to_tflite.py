@@ -7,8 +7,8 @@ import numpy as np
 print(f"TensorFlow 버전: {tf.__version__}")
 
 # 모델 경로 설정
-original_model_path = 'C:/gitproject/Final_Project/base_model_20250501-065221.h5'
-output_dir = 'C:/gitproject/Final_Project/tflite_model/'
+original_model_path = 'C:/gitproject/NAKSANG/src/fall_detection_model.h5'
+output_dir = 'C:/gitproject/NAKSANG/src/'
 
 # 출력 디렉토리 확인
 os.makedirs(output_dir, exist_ok=True)
@@ -29,13 +29,13 @@ except Exception as e:
 # 모델을 직접 생성
 print("모델을 직접 생성합니다...")
 try:
-    # 모델 입력 형태는 오류 메시지에서 확인: [None, 150, 9]
-    inputs = tf.keras.layers.Input(shape=(150, 9))
+    # 모델 입력 형태는 오류 메시지에서 확인: [None, 150, 6]
+    inputs = tf.keras.layers.Input(shape=(150, 6))
     
     # 간단한 LSTM 모델 (원본 모델과 유사하게 구성)
-    x = tf.keras.layers.LSTM(64, return_sequences=True)(inputs)
-    x = tf.keras.layers.LSTM(32)(x)
-    x = tf.keras.layers.Dense(16, activation='relu')(x)
+    x = tf.keras.layers.LSTM(32, return_sequences=True)(inputs)
+    x = tf.keras.layers.LSTM(16)(x)
+    x = tf.keras.layers.Dense(8, activation='relu')(x)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
     
     # 모델 생성
