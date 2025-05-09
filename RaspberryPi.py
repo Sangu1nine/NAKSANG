@@ -123,14 +123,14 @@ class MPU6050Sensor:
     def get_data(self):
         """Read IMU sensor data - all axes of accelerometer and gyroscope"""
         # Accelerometer data (converted to g units)
-        accel_x = self.read_word_2c(register_accel_xout_h) / sensitive_accel
-        accel_y = self.read_word_2c(register_accel_yout_h) / sensitive_accel
-        accel_z = self.read_word_2c(register_accel_zout_h) / sensitive_accel
+        accel_x = self.read_word_2c(register_accel_xout_h)
+        accel_y = self.read_word_2c(register_accel_yout_h)
+        accel_z = self.read_word_2c(register_accel_zout_h)
         
         # Gyroscope data (converted to °/s units)
-        gyro_x = self.read_word_2c(register_gyro_xout_h) / sensitive_gyro
-        gyro_y = self.read_word_2c(register_gyro_yout_h) / sensitive_gyro
-        gyro_z = self.read_word_2c(register_gyro_zout_h) / sensitive_gyro
+        gyro_x = self.read_word_2c(register_gyro_xout_h)
+        gyro_y = self.read_word_2c(register_gyro_yout_h)
+        gyro_z = self.read_word_2c(register_gyro_zout_h)
         
         # Increment frame counter
         self.frame_counter += 1
