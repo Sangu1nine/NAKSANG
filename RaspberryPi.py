@@ -121,13 +121,13 @@ class MPU6050Sensor:
         return np.array(normalized_data)
     
     def get_data(self):
-        """Read IMU sensor data - all axes of accelerometer and gyroscope"""
-        # Accelerometer data (converted to g units)
+        """Read IMU sensor data - all axes of accelerometer and gyroscope (raw data)"""
+        # Raw accelerometer data (without conversion to g units)
         accel_x = self.read_word_2c(register_accel_xout_h)
         accel_y = self.read_word_2c(register_accel_yout_h)
         accel_z = self.read_word_2c(register_accel_zout_h)
         
-        # Gyroscope data (converted to °/s units)
+        # Raw gyroscope data (without conversion to °/s units)
         gyro_x = self.read_word_2c(register_gyro_xout_h)
         gyro_y = self.read_word_2c(register_gyro_yout_h)
         gyro_z = self.read_word_2c(register_gyro_zout_h)
