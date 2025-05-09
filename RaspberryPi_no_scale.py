@@ -1,23 +1,3 @@
-"""
-주의사항:
-1. scikit-learn(sklearn) 라이브러리가 설치되어 있어야 합니다.
-   - 라즈베리파이에 설치: 'pip install scikit-learn'
-2. TFLite 모델 파일('src/fall_detection_method1.tflite')이 올바른 경로에 있어야 합니다.
-3. 스케일러 파일들이 'scalers' 디렉토리에 존재해야 합니다.
-   - 각 센서 특성(AccX, AccY, AccZ, GyrX, GyrY, GyrZ)마다 standard_scaler.pkl과 minmax_scaler.pkl 파일 필요
-
-코드 개요:
-이 코드는 라즈베리파이에서 MPU6050 센서를 이용한 실시간 낙상 감지 시스템을 구현합니다.
-- MPU6050Sensor 클래스: 센서 초기화, 데이터 읽기, 데이터 정규화 처리
-- FallDetector 클래스: TFLite 모델 로드, 시계열 데이터 관리, 낙상 예측
-- 동작 흐름:
-  1. 센서에서 가속도/자이로 데이터 읽기 (100Hz)
-  2. 데이터 정규화 (MinMax → Standard 스케일링)
-  3. 150 프레임 윈도우로 데이터 수집
-  4. 75 프레임마다 낙상 예측 수행
-  5. 낙상 감지시 "NAKSANG" 경보 발생
-"""
-
 import time
 import numpy as np
 import tflite_runtime.interpreter as tflite
@@ -53,7 +33,7 @@ sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 # Model settings
 MODEL_PATH = 'src/fall_detection_method1.tflite'
 SEQ_LENGTH = 150  # Sequence length 
-STRIDE = 75      # Prediction interval (predict every 75 data points)
+STRIDE = 10      # Prediction interval (predict every 10 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
 SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
@@ -124,15 +104,17 @@ class MPU6050Sensor:
             # Get value
             value = data[i]
             
-            # 1. 먼저 MinMax 스케일링 적용
-            if f"{feature}_minmax" in self.scalers:
-                scaler = self.scalers[f"{feature}_minmax"]
-                value = value * scaler.scale_[0] + scaler.min_[0]
-            
-            # 2. 그 다음 Standard 스케일링 적용
+            # Apply standard scaling (z-score normalization)
+            # z = (x - mean) / std
             if f"{feature}_standard" in self.scalers:
                 scaler = self.scalers[f"{feature}_standard"]
                 value = (value - scaler.mean_[0]) / scaler.scale_[0]
+            
+            # Apply min-max scaling to [0, 1] range
+            # x_norm = (x - min) / (max - min)
+            if f"{feature}_minmax" in self.scalers:
+                scaler = self.scalers[f"{feature}_minmax"]
+                value = value * scaler.scale_[0] + scaler.min_[0]
             
             normalized_data.append(value)
         
