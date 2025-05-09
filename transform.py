@@ -23,7 +23,8 @@
 
 import time
 import numpy as np
-import tflite_runtime.interpreter as tflite
+# tflite_runtime.interpreter 대신 tensorflow를 직접 사용
+import tensorflow as tf
 from collections import deque
 import signal
 import sys
@@ -293,7 +294,8 @@ class FallDetector:
     def load_model(self, model_path):
         """Load TFLite model"""
         try:
-            interpreter = tflite.Interpreter(model_path=model_path)
+            # TensorFlow를 직접 사용하여 모델 로드
+            interpreter = tf.lite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
             return interpreter
         except Exception as e:

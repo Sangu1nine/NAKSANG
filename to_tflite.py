@@ -18,12 +18,15 @@ def convert_to_tflite(model_path, output_path):
     print("TFLite 변환 중...")
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     
-    # LSTM 모델 변환 오류 해결 설정
+    # 기본 TFLite 연산만 사용하도록 설정 (호환성 향상)
+    # 주석 해제시 SELECT_TF_OPS 사용
+    """
     converter.target_spec.supported_ops = [
         tf.lite.OpsSet.TFLITE_BUILTINS,
         tf.lite.OpsSet.SELECT_TF_OPS
     ]
     converter._experimental_lower_tensor_list_ops = False
+    """
     
     # 변환 실행
     tflite_model = converter.convert()
@@ -90,11 +93,15 @@ def main():
     # 모델 경로
     keras_model_path = "models/results/fall_detection_model.keras"
     tflite_model_path = "models/fall_detection.tflite"
+    flex_tflite_path = "models/fall_detection_method1.tflite"  # 호환성을 위한 이름
     test_data_dir = "data"
     
     # 모델 변환
     print("===== TFLite 모델 변환 =====")
-    tflite_path = convert_to_tflite(keras_model_path, tflite_model_path)
+    
+    # TFLite 모델 변환 (Flex 델리게이트 포함)
+    print("\n1. Flex 델리게이트 포함 TFLite 모델 생성")
+    tflite_path = convert_to_tflite(keras_model_path, flex_tflite_path)
     
     # 모델 평가
     print("\n===== TFLite 모델 평가 =====")
