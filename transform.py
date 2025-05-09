@@ -2,7 +2,7 @@
 주의사항:
 1. scikit-learn(sklearn) 라이브러리가 설치되어 있어야 합니다.
    - 라즈베리파이에 설치: 'pip install scikit-learn'
-2. TFLite 모델 파일('src/fall_detection_method1.tflite')이 올바른 경로에 있어야 합니다.
+2. TFLite 모델 파일('models/fall_detection_method1.tflite')이 올바른 경로에 있어야 합니다.
 3. 스케일러 파일들이 'scalers' 디렉토리에 존재해야 합니다.
    - 각 센서 특성(AccX, AccY, AccZ, GyrX, GyrY, GyrZ)마다 standard_scaler.pkl과 minmax_scaler.pkl 파일 필요
 4. scipy 라이브러리가 설치되어 있어야 합니다.
@@ -59,7 +59,7 @@ INPUT_SAMPLING_RATE = 20   # Hz - 데이터 수집 레이트
 OUTPUT_SAMPLING_RATE = 100  # Hz - 모델 입력 레이트(업샘플링 후)
 
 # Model settings
-MODEL_PATH = 'src/fall_detection_method1.tflite'
+MODEL_PATH = 'models/fall_detection.tflite'
 SEQ_LENGTH = 150  # Sequence length 
 STRIDE = 75      # Prediction interval (predict every 75 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
