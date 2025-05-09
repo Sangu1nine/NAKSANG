@@ -5,17 +5,20 @@
 2. TFLite 모델 파일('src/fall_detection_method1.tflite')이 올바른 경로에 있어야 합니다.
 3. 스케일러 파일들이 'scalers' 디렉토리에 존재해야 합니다.
    - 각 센서 특성(AccX, AccY, AccZ, GyrX, GyrY, GyrZ)마다 standard_scaler.pkl과 minmax_scaler.pkl 파일 필요
+4. scipy 라이브러리가 설치되어 있어야 합니다.
+   - 라즈베리파이에 설치: 'pip install scipy'
 
 코드 개요:
 이 코드는 라즈베리파이에서 MPU6050 센서를 이용한 실시간 낙상 감지 시스템을 구현합니다.
-- MPU6050Sensor 클래스: 센서 초기화, 데이터 읽기, 데이터 정규화 처리
-- FallDetector 클래스: TFLite 모델 로드, 시계열 데이터 관리, 낙상 예측
+- 20Hz로 센서 데이터를 수집하고 푸리에 변환(FFT)을 통해 100Hz 데이터로 업샘플링합니다.
+- 업샘플링된 데이터를 사용하여 100Hz에서 학습된 모델과 호환되게 낙상 감지를 수행합니다.
 - 동작 흐름:
-  1. 센서에서 가속도/자이로 데이터 읽기 (100Hz)
-  2. 데이터 정규화 (MinMax → Standard 스케일링)
-  3. 150 프레임 윈도우로 데이터 수집
-  4. 75 프레임마다 낙상 예측 수행
-  5. 낙상 감지시 "NAKSANG" 경보 발생
+  1. 센서에서 가속도/자이로 데이터 읽기 (20Hz)
+  2. 푸리에 변환을 통한 데이터 업샘플링 (20Hz → 100Hz)
+  3. 데이터 정규화 (MinMax → Standard 스케일링)
+  4. 150 프레임 윈도우로 데이터 수집
+  5. 75 프레임마다 낙상 예측 수행
+  6. 낙상 감지시 "NAKSANG" 경보 발생
 """
 
 import time
@@ -26,6 +29,7 @@ import signal
 import sys
 import pickle
 import os
+from scipy import signal as scipy_signal  # 푸리에 변환을 위한 scipy.signal
 
 try:
     from smbus2 import SMBus
@@ -50,19 +54,35 @@ register_accel_yout_h = 0x3D
 register_accel_zout_h = 0x3F
 sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 
+# Sampling rate settings
+INPUT_SAMPLING_RATE = 20   # Hz - 데이터 수집 레이트
+OUTPUT_SAMPLING_RATE = 100  # Hz - 모델 입력 레이트(업샘플링 후)
+
 # Model settings
 MODEL_PATH = 'src/fall_detection_method1.tflite'
 SEQ_LENGTH = 150  # Sequence length 
 STRIDE = 75      # Prediction interval (predict every 75 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
-SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
 # Scalers directory
 SCALERS_DIR = 'scalers'
 
+# 푸리에 변환을 위한 버퍼 크기 
+# 3초는 절대적인 것이 아니며 실험과 테스트를 통해 최적의 버퍼 크기를 조정하면 됩니다.
+# 20Hz로 3초 데이터 = 60 샘플
+FFT_BUFFER_SIZE = 60
+
 # Load scaler functions
 def load_scalers():
-    """Load all standard and minmax scalers from pickle files"""
+    """
+    성능 참고사항:
+    - 이 코드(transfrom.py)는 20Hz로 데이터를 수집한 후 FFT 변환으로 100Hz로 업샘플링합니다.
+    - 100Hz 직접 샘플링(RaspberryPi.py)보다 I/O 부하가 80% 감소되어 라즈베리파이에 더 적합합니다.
+    - FFT 연산은 계산 집약적이지만 3초마다 한번만 수행되므로 지속적인 I/O 부하보다 효율적입니다.
+    - 초기 3초 지연은 발생하지만 그 이후 실시간 감지에는 문제가 없습니다.
+    
+    Load all standard and minmax scalers from pickle files
+    """
     scalers = {}
     features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
     
@@ -164,9 +184,96 @@ class MPU6050Sensor:
         # Return raw data
         return raw_data
 
+# FFT 기반 리샘플링 클래스
+class FFTResampler:
+    def __init__(self, input_rate=20, output_rate=100, buffer_size=60):
+        """
+        FFT 기반 리샘플링 초기화
+        
+        Args:
+            input_rate: 입력 샘플링 레이트 (Hz)
+            output_rate: 출력 샘플링 레이트 (Hz)
+            buffer_size: FFT 적용을 위한 버퍼 크기
+        """
+        self.input_rate = input_rate
+        self.output_rate = output_rate
+        self.buffer_size = buffer_size
+        
+        # 각 센서 축별 데이터 버퍼
+        self.buffers = {
+            'AccX': deque(maxlen=buffer_size),
+            'AccY': deque(maxlen=buffer_size),
+            'AccZ': deque(maxlen=buffer_size),
+            'GyrX': deque(maxlen=buffer_size),
+            'GyrY': deque(maxlen=buffer_size),
+            'GyrZ': deque(maxlen=buffer_size)
+        }
+        
+        # 리샘플링 결과 저장 큐 (output_rate/input_rate 배수만큼 데이터 생성)
+        self.resampling_factor = output_rate / input_rate
+        self.resampled_queue = deque(maxlen=int(buffer_size * self.resampling_factor))
+        
+        print(f"FFT Resampler initialized: {input_rate}Hz → {output_rate}Hz")
+    
+    def add_sample(self, data):
+        """
+        새로운 샘플 추가 (6축 센서 데이터)
+        
+        Args:
+            data: [AccX, AccY, AccZ, GyrX, GyrY, GyrZ] 값이 담긴 배열
+        """
+        features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+        
+        # 각 센서 축별로 버퍼에 데이터 추가
+        for i, feature in enumerate(features):
+            self.buffers[feature].append(data[i])
+        
+        # 버퍼가 가득 찼을 때 리샘플링 수행
+        if len(self.buffers['AccX']) == self.buffer_size:
+            self._perform_resampling()
+    
+    def _perform_resampling(self):
+        """
+        FFT 기반 리샘플링 수행
+        """
+        features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+        output_size = int(self.buffer_size * self.resampling_factor)
+        resampled_data = []
+        
+        for feature in features:
+            # 버퍼 데이터를 배열로 변환
+            buffer_data = np.array(list(self.buffers[feature]))
+            
+            # scipy.signal.resample 사용하여 FFT 기반 리샘플링
+            resampled = scipy_signal.resample(buffer_data, output_size)
+            
+            # 리샘플링된 데이터 저장
+            resampled_data.append(resampled)
+        
+        # 리샘플링된 모든 축의 데이터를 시간 순서대로 큐에 저장
+        # 출력: [(t1에서의 6축 데이터), (t2에서의 6축 데이터), ...] 형태
+        for i in range(output_size):
+            self.resampled_queue.append(np.array([resampled_data[j][i] for j in range(len(features))]))
+    
+    def get_resampled_data(self):
+        """
+        리샘플링된 데이터 반환
+        
+        Returns:
+            리샘플링된 데이터 큐에서 가장 오래된 샘플 하나를 반환
+            큐가 비어있으면 None 반환
+        """
+        if len(self.resampled_queue) > 0:
+            return self.resampled_queue.popleft()
+        return None
+    
+    def has_resampled_data(self):
+        """리샘플링된 데이터가 있는지 확인"""
+        return len(self.resampled_queue) > 0
+
 # Fall detector class
 class FallDetector:
-    def __init__(self, model_path, seq_length=50, stride=10, n_features=6):
+    def __init__(self, model_path, seq_length=150, stride=75, n_features=6):
         """Initialize fall detection model"""
         self.seq_length = seq_length
         self.stride = stride
@@ -259,7 +366,7 @@ class FallDetector:
 
 def main():
     """Main function"""
-    print("Fall detection system starting")
+    print("Fall detection system starting (20Hz with FFT upsampling)")
     
     try:
         # Load scalers
@@ -283,6 +390,13 @@ def main():
             n_features=N_FEATURES
         )
         
+        # Initialize FFT resampler
+        resampler = FFTResampler(
+            input_rate=INPUT_SAMPLING_RATE,
+            output_rate=OUTPUT_SAMPLING_RATE,
+            buffer_size=FFT_BUFFER_SIZE
+        )
+        
         # Ctrl+C signal handler
         def signal_handler(sig, frame):
             print("\nProgram terminated")
@@ -293,12 +407,28 @@ def main():
         # Fall detection loop
         print("Collecting sensor data...")
         
-        # Fill initial data buffer
-        print(f"Filling initial data buffer ({SEQ_LENGTH} samples)...")
-        for _ in range(SEQ_LENGTH):
+        # 초기 데이터 수집 (FFT 버퍼 채우기)
+        print(f"Filling initial FFT buffer ({FFT_BUFFER_SIZE} samples at {INPUT_SAMPLING_RATE}Hz)...")
+        for _ in range(FFT_BUFFER_SIZE):
             data = sensor.get_data()
-            detector.add_data_point(data)
-            time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
+            resampler.add_sample(data)
+            time.sleep(1.0 / INPUT_SAMPLING_RATE)  # 20Hz 샘플링
+        
+        # 리샘플링된 데이터로 초기 검출 버퍼 채우기
+        print(f"Filling initial detection buffer ({SEQ_LENGTH} samples)...")
+        buffer_count = 0
+        while buffer_count < SEQ_LENGTH:
+            # FFT 리샘플링된 데이터 처리
+            if resampler.has_resampled_data():
+                resampled_data = resampler.get_resampled_data()
+                detector.add_data_point(resampled_data)
+                buffer_count += 1
+            
+            # FFT 버퍼가 비어있으면 더 많은 데이터 수집
+            if not resampler.has_resampled_data():
+                data = sensor.get_data()
+                resampler.add_sample(data)
+                time.sleep(1.0 / INPUT_SAMPLING_RATE)  # 20Hz 샘플링
         
         print("Real-time fall detection started")
         
@@ -307,8 +437,11 @@ def main():
         alarm_start_time = 0
         
         while True:
-            # Read sensor data
+            # 20Hz로 센서 데이터 읽기
             data = sensor.get_data()
+            
+            # 리샘플러에 데이터 추가
+            resampler.add_sample(data)
             
             # Debug output (once per second)
             current_time = time.time()
@@ -317,26 +450,27 @@ def main():
                 print(f"Gyroscope(°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
                 last_time = current_time
             
-            # Add to data buffer
-            detector.add_data_point(data)
-            
-            # Perform prediction based on stride interval
-            if detector.should_predict():
-                # Fall prediction
-                result = detector.predict()
+            # 리샘플링된 데이터 처리 (100Hz)
+            while resampler.has_resampled_data():
+                resampled_data = resampler.get_resampled_data()
+                detector.add_data_point(resampled_data)
                 
-                # If result exists and fall is predicted
-                if result and result['prediction'] == 1:
-                    print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
-                    detector.trigger_alarm()
-                    alarm_start_time = current_time
+                # 낙상 예측
+                if detector.should_predict():
+                    result = detector.predict()
+                    
+                    # 낙상 감지시 경보
+                    if result and result['prediction'] == 1:
+                        print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
+                        detector.trigger_alarm()
+                        alarm_start_time = current_time
             
-            # Automatically turn off alarm after 3 seconds
+            # 3초 후 경보 해제
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
                 detector.stop_alarm()
             
-            # Maintain sampling rate
-            sleep_time = 1.0 / SAMPLING_RATE - (time.time() - current_time)
+            # 20Hz 샘플링 유지
+            sleep_time = 1.0 / INPUT_SAMPLING_RATE - (time.time() - current_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
             

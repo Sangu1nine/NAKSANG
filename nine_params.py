@@ -1,31 +1,9 @@
-"""
-주의사항:
-1. scikit-learn(sklearn) 라이브러리가 설치되어 있어야 합니다.
-   - 라즈베리파이에 설치: 'pip install scikit-learn'
-2. TFLite 모델 파일('src/fall_detection_method1.tflite')이 올바른 경로에 있어야 합니다.
-3. 스케일러 파일들이 'scalers' 디렉토리에 존재해야 합니다.
-   - 각 센서 특성(AccX, AccY, AccZ, GyrX, GyrY, GyrZ)마다 standard_scaler.pkl과 minmax_scaler.pkl 파일 필요
-
-코드 개요:
-이 코드는 라즈베리파이에서 MPU6050 센서를 이용한 실시간 낙상 감지 시스템을 구현합니다.
-- MPU6050Sensor 클래스: 센서 초기화, 데이터 읽기, 데이터 정규화 처리
-- FallDetector 클래스: TFLite 모델 로드, 시계열 데이터 관리, 낙상 예측
-- 동작 흐름:
-  1. 센서에서 가속도/자이로 데이터 읽기 (100Hz)
-  2. 데이터 정규화 (MinMax → Standard 스케일링)
-  3. 150 프레임 윈도우로 데이터 수집
-  4. 75 프레임마다 낙상 예측 수행
-  5. 낙상 감지시 "NAKSANG" 경보 발생
-"""
-
 import time
 import numpy as np
 import tflite_runtime.interpreter as tflite
 from collections import deque
 import signal
 import sys
-import pickle
-import os
 
 try:
     from smbus2 import SMBus
@@ -51,38 +29,15 @@ register_accel_zout_h = 0x3F
 sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 
 # Model settings
-MODEL_PATH = 'src/fall_detection_method1.tflite'
+MODEL_PATH = 'fall_detection_method1.tflite'
 SEQ_LENGTH = 150  # Sequence length 
-STRIDE = 75      # Prediction interval (predict every 75 data points)
-N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
+STRIDE = 10      # Prediction interval (predict every 10 data points)
+N_FEATURES = 9   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ, EulerX, EulerY, EulerZ)
 SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
-
-# Scalers directory
-SCALERS_DIR = 'scalers'
-
-# Load scaler functions
-def load_scalers():
-    """Load all standard and minmax scalers from pickle files"""
-    scalers = {}
-    features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
-    
-    for feature in features:
-        std_scaler_path = os.path.join(SCALERS_DIR, f"{feature}_standard_scaler.pkl")
-        minmax_scaler_path = os.path.join(SCALERS_DIR, f"{feature}_minmax_scaler.pkl")
-        
-        try:
-            with open(std_scaler_path, 'rb') as f:
-                scalers[f"{feature}_standard"] = pickle.load(f)
-            with open(minmax_scaler_path, 'rb') as f:
-                scalers[f"{feature}_minmax"] = pickle.load(f)
-        except Exception as e:
-            print(f"Error loading scaler for {feature}: {e}")
-    
-    return scalers
 
 # MPU6050 sensor class
 class MPU6050Sensor:
-    def __init__(self, scalers=None):
+    def __init__(self):
         """Initialize IMU sensor (MPU6050) and I2C settings"""
         if not SENSOR_AVAILABLE:
             raise ImportError("smbus2 library is not installed.")
@@ -90,7 +45,6 @@ class MPU6050Sensor:
         self.bus = SMBus(1)  # Use I2C bus 1
         self.setup_mpu6050()
         self.frame_counter = 0
-        self.scalers = scalers
         print("MPU6050 sensor initialization complete")
     
     def setup_mpu6050(self):
@@ -114,30 +68,6 @@ class MPU6050Sensor:
         else:
             return val
     
-    def normalize_data(self, data, feature_names):
-        """Standard scale and normalize the sensor data"""
-        if self.scalers is None:
-            return data  # Return original data if no scalers are provided
-        
-        normalized_data = []
-        for i, feature in enumerate(feature_names):
-            # Get value
-            value = data[i]
-            
-            # 1. 먼저 MinMax 스케일링 적용
-            if f"{feature}_minmax" in self.scalers:
-                scaler = self.scalers[f"{feature}_minmax"]
-                value = value * scaler.scale_[0] + scaler.min_[0]
-            
-            # 2. 그 다음 Standard 스케일링 적용
-            if f"{feature}_standard" in self.scalers:
-                scaler = self.scalers[f"{feature}_standard"]
-                value = (value - scaler.mean_[0]) / scaler.scale_[0]
-            
-            normalized_data.append(value)
-        
-        return np.array(normalized_data)
-    
     def get_data(self):
         """Read IMU sensor data - all axes of accelerometer and gyroscope"""
         # Accelerometer data (converted to g units)
@@ -150,23 +80,24 @@ class MPU6050Sensor:
         gyro_y = self.read_word_2c(register_gyro_yout_h) / sensitive_gyro
         gyro_z = self.read_word_2c(register_gyro_zout_h) / sensitive_gyro
         
+        # Euler angle calculation (simplified method)
+        accel_xangle = np.arctan2(accel_y, np.sqrt(accel_x**2 + accel_z**2)) * 180 / np.pi
+        accel_yangle = np.arctan2(-accel_x, np.sqrt(accel_y**2 + accel_z**2)) * 180 / np.pi
+        accel_zangle = np.arctan2(accel_z, np.sqrt(accel_x**2 + accel_y**2)) * 180 / np.pi
+        
         # Increment frame counter
         self.frame_counter += 1
         
-        # Collect raw data
-        raw_data = np.array([accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
-        
-        # Normalize data if scalers are provided
-        if self.scalers:
-            feature_names = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
-            return self.normalize_data(raw_data, feature_names)
-        
-        # Return raw data
-        return raw_data
+        # Return all data
+        return np.array([
+            accel_x, accel_y, accel_z,
+            gyro_x, gyro_y, gyro_z,
+            accel_xangle, accel_yangle, accel_zangle
+        ])
 
 # Fall detector class
 class FallDetector:
-    def __init__(self, model_path, seq_length=50, stride=10, n_features=6):
+    def __init__(self, model_path, seq_length=50, stride=10, n_features=9):
         """Initialize fall detection model"""
         self.seq_length = seq_length
         self.stride = stride
@@ -262,14 +193,9 @@ def main():
     print("Fall detection system starting")
     
     try:
-        # Load scalers
-        print("Loading scalers...")
-        scalers = load_scalers()
-        print(f"Loaded {len(scalers)} scalers")
-        
         # Initialize sensor
         try:
-            sensor = MPU6050Sensor(scalers=scalers)
+            sensor = MPU6050Sensor()
         except Exception as e:
             print(f"Sensor initialization failed: {e}")
             print("Terminating program.")
