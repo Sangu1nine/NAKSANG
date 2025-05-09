@@ -33,7 +33,7 @@ sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 # Model settings
 MODEL_PATH = 'src/fall_detection_method1.tflite'
 SEQ_LENGTH = 150  # Sequence length 
-STRIDE = 10      # Prediction interval (predict every 10 data points)
+STRIDE = 75      # Prediction interval (predict every 10 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
 SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
