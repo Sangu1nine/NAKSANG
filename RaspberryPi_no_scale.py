@@ -1,9 +1,11 @@
-import time
+import pickle
+import os
 import numpy as np
 import tflite_runtime.interpreter as tflite
 from collections import deque
 import signal
 import sys
+import time
 
 try:
     from smbus2 import SMBus
@@ -97,7 +99,7 @@ class MPU6050Sensor:
 
 # Fall detector class
 class FallDetector:
-    def __init__(self, model_path, seq_length=50, stride=10, n_features=9):
+    def __init__(self, model_path, scalers_path, seq_length=150, stride=10, n_features=9):
         """Initialize fall detection model"""
         self.seq_length = seq_length
         self.stride = stride
@@ -105,6 +107,14 @@ class FallDetector:
         self.data_buffer = deque(maxlen=seq_length)
         self.alarm_active = False
         self.data_counter = 0  # Data counter
+        
+        # 센서 특성 정의 (첫 번째 코드와 일치해야 함)
+        self.sensor_features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+        
+        # 스케일러 로드
+        self.minmax_scalers = {}
+        self.standard_scalers = {}
+        self.load_scalers(scalers_path)
         
         # Load TFLite model
         self.interpreter = self.load_model(model_path)
@@ -114,19 +124,55 @@ class FallDetector:
         print(f"Input shape: {self.input_details[0]['shape']}")
         print(f"Output shape: {self.output_details[0]['shape']}")
     
-    def load_model(self, model_path):
-        """Load TFLite model"""
+    def load_scalers(self, scalers_path):
+        """스케일러 로드 함수"""
         try:
-            interpreter = tflite.Interpreter(model_path=model_path)
-            interpreter.allocate_tensors()
-            return interpreter
+            # MinMaxScaler 로드
+            for feature in self.sensor_features:
+                minmax_path = os.path.join(scalers_path, f"{feature}_minmax_scaler.pkl")
+                standard_path = os.path.join(scalers_path, f"{feature}_standard_scaler.pkl")
+                
+                with open(minmax_path, 'rb') as f:
+                    self.minmax_scalers[feature] = pickle.load(f)
+                
+                with open(standard_path, 'rb') as f:
+                    self.standard_scalers[feature] = pickle.load(f)
+            
+            print("Scalers loaded successfully")
         except Exception as e:
-            print(f"Error loading model: {str(e)}")
+            print(f"Error loading scalers: {str(e)}")
             raise
     
+    def apply_scaling(self, data):
+        """데이터에 스케일링 적용"""
+        # 원본 데이터는 [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, accel_xangle, accel_yangle, accel_zangle]
+        # 스케일러는 처음 6개 특성(AccX, AccY, AccZ, GyrX, GyrY, GyrZ)에만 적용
+        
+        scaled_data = data.copy()
+        
+        # 처음 6개 특성에 대해 스케일링 적용
+        for i, feature in enumerate(self.sensor_features):
+            # 데이터가 1D 배열이면 스칼라 값을 2D로 변환
+            value = data[i].reshape(-1, 1)
+            
+            # MinMax 스케일링 적용
+            minmax_scaled = self.minmax_scalers[feature].transform(value)
+            
+            # Standard 스케일링 적용
+            standard_scaled = self.standard_scalers[feature].transform(minmax_scaled)
+            
+            # 결과를 원래 형태로 변환
+            scaled_data[i] = standard_scaled.flatten()[0]
+        
+        return scaled_data
+    
     def add_data_point(self, data_array):
-        """Add new data point to the data buffer"""
-        self.data_buffer.append(data_array)
+        """스케일링을 적용한 데이터 추가"""
+        # 스케일링 적용
+        scaled_data = self.apply_scaling(data_array)
+        
+        # 버퍼에 추가
+        self.data_buffer.append(scaled_data)
         self.data_counter += 1
     
     def should_predict(self):
@@ -192,6 +238,10 @@ def main():
     """Main function"""
     print("Fall detection system starting")
     
+    # 모델 및 스케일러 경로 설정
+    MODEL_PATH = 'fall_detection_method1.tflite'
+    SCALERS_PATH = 'preprocessed_data_stride50_0508/scalers'  # 첫 번째 코드에서 저장한, 스케일러 경로
+    
     try:
         # Initialize sensor
         try:
@@ -201,9 +251,10 @@ def main():
             print("Terminating program.")
             return
         
-        # Initialize fall detector
+        # Initialize fall detector with scalers path
         detector = FallDetector(
             model_path=MODEL_PATH,
+            scalers_path=SCALERS_PATH,
             seq_length=SEQ_LENGTH,
             stride=STRIDE,
             n_features=N_FEATURES
