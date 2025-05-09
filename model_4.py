@@ -13,36 +13,11 @@ import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
-import gc  # 가비지 컬렉션
-import time
-from datetime import datetime
-
-# GPU 설정 확인 및 메모리 최적화
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
-        # 메모리 증가를 허용 (필요에 따라 메모리 할당)
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"GPU 사용 가능: {len(gpus)}개의 GPU가 감지되었습니다.")
-        print(f"활성화된 GPU: {gpus}")
-    except RuntimeError as e:
-        print(f"GPU 설정 오류: {e}")
-else:
-    print("GPU가 감지되지 않았습니다. CPU를 사용합니다.")
-
-# 메모리 관리 함수
-def clear_memory():
-    gc.collect()
-    tf.keras.backend.clear_session()
-
-# 현재 시간을 포함한 실행 ID 생성 (로그 및 체크포인트 저장용)
-run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 # 데이터 로드
-base_path = "/content/drive/MyDrive/Digital_Smart_Final"
-models_dir = os.path.join(base_path, 'models/models_4')
-data_path = os.path.join(base_path, 'sam_100_win_150_str_75')
+base_path = "."
+models_dir = os.path.join(base_path, 'models')
+data_path = os.path.join(base_path, 'data')
 os.makedirs(models_dir, exist_ok=True)
 
 print("데이터 로딩 중...")
@@ -107,7 +82,7 @@ callbacks = [
 ]
 
 history = model.fit(X_train, y_train,
-                    epochs=50,
+                    epochs=30,
                     batch_size=16,
                     validation_split=0.2,
                     callbacks=callbacks,
@@ -158,6 +133,12 @@ plt.tight_layout()
 plt.savefig(os.path.join(results_dir, 'learning_curves.png'))
 plt.close()
 
-# 모델 저장
-model.save(os.path.join(results_dir, 'fall_detection_model.h5'))
-print("\n모델 저장 완료")
+# 모델 저장 (.keras 형식으로 변경)
+keras_model_path = os.path.join(results_dir, 'fall_detection_model.keras')
+model.save(keras_model_path)
+print(f"\n모델 저장 완료: {keras_model_path}")
+
+# 이전 버전과의 호환성을 위해 h5 형식으로도 저장
+h5_model_path = os.path.join(results_dir, 'fall_detection_model.h5')
+model.save(h5_model_path, save_format='h5')
+print(f"호환성을 위한 h5 모델 저장 완료: {h5_model_path}")
