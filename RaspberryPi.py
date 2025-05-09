@@ -1,6 +1,6 @@
 import time
 import numpy as np
-import tflite_runtime.interpreter as tflite
+import tensorflow as tf  # TensorFlow 전체 import
 from collections import deque
 import signal
 import sys
@@ -168,7 +168,7 @@ class FallDetector:
     def load_model(self, model_path):
         """Load TFLite model"""
         try:
-            interpreter = tflite.Interpreter(model_path=model_path)
+            interpreter = tf.lite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
             return interpreter
         except Exception as e:
