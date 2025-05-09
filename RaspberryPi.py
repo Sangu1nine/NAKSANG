@@ -31,7 +31,7 @@ register_accel_zout_h = 0x3F
 sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 
 # Model settings
-MODEL_PATH = 'src/fall_detection_method1.tflite'
+MODEL_PATH = 'models/fall_detection.tflite'
 SEQ_LENGTH = 150  # Sequence length 
 STRIDE = 75      # Prediction interval (predict every 10 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
