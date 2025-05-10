@@ -121,30 +121,40 @@ class MPU6050Sensor:
         return np.array(normalized_data)
     
     def get_data(self):
-        """Read IMU sensor data - all axes of accelerometer and gyroscope (raw data)"""
-        # Raw accelerometer data (without conversion to g units)
+        """Read IMU sensor data - all axes of accelerometer and gyroscope (converted to physical units)"""
+        # Raw accelerometer data
         accel_x = self.read_word_2c(register_accel_xout_h)
         accel_y = self.read_word_2c(register_accel_yout_h)
         accel_z = self.read_word_2c(register_accel_zout_h)
         
-        # Raw gyroscope data (without conversion to °/s units)
+        # Convert accelerometer data to g units
+        accel_x = accel_x / sensitive_accel
+        accel_y = accel_y / sensitive_accel
+        accel_z = accel_z / sensitive_accel
+        
+        # Raw gyroscope data
         gyro_x = self.read_word_2c(register_gyro_xout_h)
         gyro_y = self.read_word_2c(register_gyro_yout_h)
         gyro_z = self.read_word_2c(register_gyro_zout_h)
         
+        # Convert gyroscope data to degrees per second
+        gyro_x = gyro_x / sensitive_gyro
+        gyro_y = gyro_y / sensitive_gyro
+        gyro_z = gyro_z / sensitive_gyro
+        
         # Increment frame counter
         self.frame_counter += 1
         
-        # Collect raw data
-        raw_data = np.array([accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
+        # Collect converted data
+        converted_data = np.array([accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
         
         # Normalize data if scalers are provided
         if self.scalers:
             feature_names = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
-            return self.normalize_data(raw_data, feature_names)
+            return self.normalize_data(converted_data, feature_names)
         
-        # Return raw data
-        return raw_data
+        # Return converted data
+        return converted_data
 
 # Fall detector class
 class FallDetector:
