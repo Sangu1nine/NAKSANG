@@ -62,10 +62,10 @@ def connect_wifi():
         wifi_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         wifi_client.connect((WIFI_SERVER_IP, WIFI_SERVER_PORT))
         wifi_connected = True
-        print(f"WiFi 연결 성공: {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}")
+        print(f"WiFi connection successful: {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}")
         return True
     except Exception as e:
-        print(f"WiFi 연결 실패: {str(e)}")
+        print(f"WiFi connection failed: {str(e)}")
         wifi_connected = False
         return False
 
@@ -81,7 +81,7 @@ def send_data_thread():
                 data_json = json.dumps(sensor_data)
                 wifi_client.sendall((data_json + '\n').encode('utf-8'))
             except Exception as e:
-                print(f"데이터 전송 오류: {str(e)}")
+                print(f"Data transmission error: {str(e)}")
                 wifi_connected = False
                 break
         else:
@@ -92,7 +92,7 @@ def close_wifi():
     if wifi_client:
         try:
             wifi_client.close()
-            print("WiFi 연결 종료")
+            print("WiFi connection closed")
         except:
             pass
     wifi_connected = False
@@ -108,8 +108,8 @@ data = []
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 filename = f"imu_data_{timestamp}.csv"
 
-print(f"데이터 수집 시작 (100Hz) - 저장 파일: {filename}")
-print("Ctrl+C로 수집 종료")
+print(f"Data collection started (100Hz) - Save file: {filename}")
+print("Press Ctrl+C to stop collection")
 
 # WiFi 연결 시도
 wifi_thread = None
@@ -155,13 +155,13 @@ try:
         
         # 1초에 한 번씩 진행 상황 출력
         if sample_count % 100 == 0:
-            print(f"샘플 수: {sample_count}, 경과 시간: {elapsed:.2f}초, 샘플링 레이트: {sample_count/elapsed:.2f}Hz")
-            print(f"가속도(g): X={accel_x:.2f}, Y={accel_y:.2f}, Z={accel_z:.2f}")
-            print(f"자이로(°/s): X={gyro_x:.2f}, Y={gyro_y:.2f}, Z={gyro_z:.2f}")
+            print(f"Samples: {sample_count}, Elapsed time: {elapsed:.2f}s, Sampling rate: {sample_count/elapsed:.2f}Hz")
+            print(f"Acceleration(g): X={accel_x:.2f}, Y={accel_y:.2f}, Z={accel_z:.2f}")
+            print(f"Gyroscope(°/s): X={gyro_x:.2f}, Y={gyro_y:.2f}, Z={gyro_z:.2f}")
             if wifi_connected:
-                print(f"WiFi 전송 상태: 연결됨 (큐 길이: {len(send_data_queue)})")
+                print(f"WiFi transmission status: Connected (Queue length: {len(send_data_queue)})")
             else:
-                print("WiFi 전송 상태: 연결되지 않음")
+                print("WiFi transmission status: Not connected")
         
         # 샘플링 레이트 유지 (100Hz = 0.01초 간격)
         next_sample_time = start_time + (sample_count * (1.0 / target_hz))
@@ -171,7 +171,7 @@ try:
             time.sleep(sleep_time)
 
 except KeyboardInterrupt:
-    print("\n데이터 수집 종료!")
+    print("\nData collection stopped!")
     
     # 데이터프레임 생성
     df = pd.DataFrame(data, columns=columns)
@@ -182,13 +182,13 @@ except KeyboardInterrupt:
     
     # CSV 파일로 저장
     df.to_csv(filename)
-    print(f"데이터 저장 완료: {filename} (총 {len(df)}개 샘플)")
+    print(f"Data saved: {filename} (Total {len(df)} samples)")
     
 except Exception as e:
-    print(f"\n오류 발생: {str(e)}")
+    print(f"\nError occurred: {str(e)}")
 finally:
     # WiFi 연결 종료
     close_wifi()
     
     bus.close()
-    print("I2C 버스 닫힘")
+    print("I2C bus closed")
