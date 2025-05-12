@@ -6,8 +6,8 @@ import numpy as np
 import datetime
 import time
 import os
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui
 from collections import deque
 
 # 서버 설정
@@ -21,7 +21,7 @@ data_lock = threading.Lock()
 is_receiving = False
 
 # 실시간 시각화를 위한 데이터 버퍼
-buffer_size = 500  # 최근 500개 데이터 포인트만 유지
+buffer_size = 1000  # 최근 1000개 데이터 포인트만 유지
 time_buffer = deque(maxlen=buffer_size)
 accel_x_buffer = deque(maxlen=buffer_size)
 accel_y_buffer = deque(maxlen=buffer_size)
@@ -30,13 +30,14 @@ gyro_x_buffer = deque(maxlen=buffer_size)
 gyro_y_buffer = deque(maxlen=buffer_size)
 gyro_z_buffer = deque(maxlen=buffer_size)
 
-# 플롯 객체 저장 변수
-fig = None
-axes = None
-lines = {}
-plot_start_time = None
+# PyQtGraph 관련 변수
+app = None
+win = None
+accel_plot = None
+gyro_plot = None
+accel_curves = {}
+gyro_curves = {}
 visualization_active = False
-ani = None  # 애니메이션 객체 저장용
 
 def create_data_folder():
     if not os.path.exists(DATA_FOLDER):
@@ -44,109 +45,83 @@ def create_data_folder():
         print(f"데이터 폴더 생성: {DATA_FOLDER}")
 
 def init_visualization():
-    global fig, axes, lines, plot_start_time, visualization_active, ani
+    global app, win, accel_plot, gyro_plot, accel_curves, gyro_curves, visualization_active
     
     if visualization_active:
         return
         
     visualization_active = True
-    plot_start_time = time.time()
     
-    # 그래프 생성
-    plt.ion()  # 인터랙티브 모드 켜기
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    fig.suptitle("IMU 데이터 실시간 모니터링", fontsize=16)
+    # PyQtGraph 초기화
+    app = pg.mkQApp("IMU Data Visualization")
+    win = pg.GraphicsLayoutWidget(show=True, title="IMU 데이터 실시간 모니터링")
+    win.resize(1000, 800)
     
     # 가속도 그래프 설정
-    axes[0].set_title("가속도 (g)")
-    axes[0].set_ylabel("가속도 (g)")
-    axes[0].grid(True)
-    axes[0].set_ylim(-2, 2)  # 초기 y축 범위 설정
+    accel_plot = win.addPlot(row=0, col=0, title="가속도 (g)")
+    accel_plot.setLabel('left', '가속도', 'g')
+    accel_plot.setLabel('bottom', '시간', 's')
+    accel_plot.addLegend()
+    accel_plot.showGrid(x=True, y=True)
     
     # 자이로스코프 그래프 설정
-    axes[1].set_title("자이로스코프 (°/s)")
-    axes[1].set_xlabel("시간 (초)")
-    axes[1].set_ylabel("각속도 (°/s)")
-    axes[1].grid(True)
-    axes[1].set_ylim(-250, 250)  # 초기 y축 범위 설정
+    win.nextRow()
+    gyro_plot = win.addPlot(row=1, col=0, title="자이로스코프 (°/s)")
+    gyro_plot.setLabel('left', '각속도', '°/s')
+    gyro_plot.setLabel('bottom', '시간', 's')
+    gyro_plot.addLegend()
+    gyro_plot.showGrid(x=True, y=True)
     
     # 데이터 라인 생성
-    lines['accel_x'], = axes[0].plot([], [], 'r-', label='X축')
-    lines['accel_y'], = axes[0].plot([], [], 'g-', label='Y축')
-    lines['accel_z'], = axes[0].plot([], [], 'b-', label='Z축')
+    accel_curves['x'] = accel_plot.plot(pen='r', name='X축')
+    accel_curves['y'] = accel_plot.plot(pen='g', name='Y축')
+    accel_curves['z'] = accel_plot.plot(pen='b', name='Z축')
     
-    lines['gyro_x'], = axes[1].plot([], [], 'r-', label='X축')
-    lines['gyro_y'], = axes[1].plot([], [], 'g-', label='Y축')
-    lines['gyro_z'], = axes[1].plot([], [], 'b-', label='Z축')
+    gyro_curves['x'] = gyro_plot.plot(pen='r', name='X축')
+    gyro_curves['y'] = gyro_plot.plot(pen='g', name='Y축')
+    gyro_curves['z'] = gyro_plot.plot(pen='b', name='Z축')
     
-    # 범례 추가
-    axes[0].legend(loc='upper right')
-    axes[1].legend(loc='upper right')
+    # 자동 스케일링 설정
+    accel_plot.enableAutoRange()
+    gyro_plot.enableAutoRange()
     
-    # 레이아웃 조정
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.show(block=False)
-    
-    # 주기적 업데이트를 위한 애니메이션 설정
-    ani = FuncAnimation(fig, update_plot, interval=100, blit=True)
-    
-    # 초기화 완료 대기
-    plt.pause(0.1)
+    # 타이머 설정 (100ms마다 업데이트)
+    timer = QtCore.QTimer()
+    timer.timeout.connect(update_plot)
+    timer.start(100)
 
-def update_plot(frame):
-    global time_buffer, fig, axes, lines, plot_start_time
+def update_plot():
+    global time_buffer, accel_plot, gyro_plot, accel_curves, gyro_curves
     
     if len(time_buffer) == 0:
-        return (lines['accel_x'], lines['accel_y'], lines['accel_z'],
-                lines['gyro_x'], lines['gyro_y'], lines['gyro_z'])
+        return
         
     with data_lock:
-        # 시간 데이터 (상대적)
-        t = list(time_buffer)
-        
-        # 가속도 데이터
-        ax = list(accel_x_buffer)
-        ay = list(accel_y_buffer)
-        az = list(accel_z_buffer)
-        
-        # 자이로스코프 데이터
-        gx = list(gyro_x_buffer)
-        gy = list(gyro_y_buffer)
-        gz = list(gyro_z_buffer)
+        # 데이터 가져오기
+        t = np.array(time_buffer)
+        ax = np.array(accel_x_buffer)
+        ay = np.array(accel_y_buffer)
+        az = np.array(accel_z_buffer)
+        gx = np.array(gyro_x_buffer)
+        gy = np.array(gyro_y_buffer)
+        gz = np.array(gyro_z_buffer)
     
     # 데이터 업데이트
-    lines['accel_x'].set_data(t, ax)
-    lines['accel_y'].set_data(t, ay)
-    lines['accel_z'].set_data(t, az)
+    accel_curves['x'].setData(t, ax)
+    accel_curves['y'].setData(t, ay)
+    accel_curves['z'].setData(t, az)
     
-    lines['gyro_x'].set_data(t, gx)
-    lines['gyro_y'].set_data(t, gy)
-    lines['gyro_z'].set_data(t, gz)
+    gyro_curves['x'].setData(t, gx)
+    gyro_curves['y'].setData(t, gy)
+    gyro_curves['z'].setData(t, gz)
     
     # x축 범위 자동 조정
     if len(t) > 0:
-        for ax in axes:
-            ax.set_xlim(min(t), max(t))
-        
-        # y축 범위 자동 조정 (가속도)
-        if len(ax) > 0:
-            all_accel = ax + ay + az
-            min_val = min(all_accel) - 0.1
-            max_val = max(all_accel) + 0.1
-            axes[0].set_ylim(min_val, max_val)
-        
-        # y축 범위 자동 조정 (자이로스코프)
-        if len(gx) > 0:
-            all_gyro = gx + gy + gz
-            min_val = min(all_gyro) - 0.1
-            max_val = max(all_gyro) + 0.1
-            axes[1].set_ylim(min_val, max_val)
-    
-    return (lines['accel_x'], lines['accel_y'], lines['accel_z'],
-            lines['gyro_x'], lines['gyro_y'], lines['gyro_z'])
+        accel_plot.setXRange(min(t), max(t))
+        gyro_plot.setXRange(min(t), max(t))
 
 def client_handler(client_socket, client_address):
-    global received_data, is_receiving, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, plot_start_time
+    global received_data, is_receiving, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer
     
     print(f"클라이언트 연결됨: {client_address}")
     
@@ -246,7 +221,7 @@ def save_received_data():
         received_data = []
 
 def start_server():
-    global is_receiving, ani
+    global is_receiving
     
     # 데이터 폴더 생성
     create_data_folder()
@@ -284,13 +259,7 @@ def start_server():
         
         # 남은 데이터 저장
         save_received_data()
-        
-        # 시각화 창 닫기
-        if fig is not None:
-            if ani is not None:
-                ani.event_source.stop()
-            plt.close(fig)
 
 if __name__ == "__main__":
     print("IMU 데이터 수신 및 실시간 시각화 서버 시작")
-    start_server() 
+    start_server()
