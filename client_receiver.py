@@ -6,6 +6,9 @@ import numpy as np
 import datetime
 import time
 import os
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque
 
 # 서버 설정
 SERVER_IP = '0.0.0.0'  # 모든 네트워크 인터페이스에서 연결 수신
@@ -17,19 +20,141 @@ received_data = []
 data_lock = threading.Lock()
 is_receiving = False
 
+# 실시간 시각화를 위한 데이터 버퍼
+# deque를 사용하여 최대 길이를 제한 (메모리 사용 제한)
+buffer_size = 500  # 최근 500개 데이터 포인트만 유지
+time_buffer = deque(maxlen=buffer_size)
+accel_x_buffer = deque(maxlen=buffer_size)
+accel_y_buffer = deque(maxlen=buffer_size)
+accel_z_buffer = deque(maxlen=buffer_size)
+gyro_x_buffer = deque(maxlen=buffer_size)
+gyro_y_buffer = deque(maxlen=buffer_size)
+gyro_z_buffer = deque(maxlen=buffer_size)
+
+# 플롯 객체 저장 변수
+fig = None
+axes = None
+lines = {}
+plot_start_time = None
+visualization_active = False
+
 def create_data_folder():
     if not os.path.exists(DATA_FOLDER):
         os.makedirs(DATA_FOLDER)
         print(f"데이터 폴더 생성: {DATA_FOLDER}")
 
+def init_visualization():
+    global fig, axes, lines, plot_start_time, visualization_active
+    
+    # 이미 실행 중인 경우 반환
+    if visualization_active:
+        return
+        
+    visualization_active = True
+    plot_start_time = time.time()
+    
+    # 그래프 생성
+    plt.ion()  # 인터랙티브 모드 켜기
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    fig.suptitle("IMU 데이터 실시간 모니터링", fontsize=16)
+    
+    # 가속도 그래프 설정
+    axes[0].set_title("가속도 (g)")
+    axes[0].set_ylabel("가속도 (g)")
+    axes[0].grid(True)
+    
+    # 자이로스코프 그래프 설정
+    axes[1].set_title("자이로스코프 (°/s)")
+    axes[1].set_xlabel("시간 (초)")
+    axes[1].set_ylabel("각속도 (°/s)")
+    axes[1].grid(True)
+    
+    # 데이터 라인 생성
+    lines['accel_x'], = axes[0].plot([], [], 'r-', label='X축')
+    lines['accel_y'], = axes[0].plot([], [], 'g-', label='Y축')
+    lines['accel_z'], = axes[0].plot([], [], 'b-', label='Z축')
+    
+    lines['gyro_x'], = axes[1].plot([], [], 'r-', label='X축')
+    lines['gyro_y'], = axes[1].plot([], [], 'g-', label='Y축')
+    lines['gyro_z'], = axes[1].plot([], [], 'b-', label='Z축')
+    
+    # 범례 추가
+    axes[0].legend(loc='upper right')
+    axes[1].legend(loc='upper right')
+    
+    # 레이아웃 조정
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show(block=False)
+    
+    # 주기적 업데이트를 위한 애니메이션 설정
+    ani = FuncAnimation(fig, update_plot, interval=100)  # 100ms마다 업데이트
+    
+def update_plot(frame):
+    global time_buffer, fig, axes, lines, plot_start_time
+    
+    if len(time_buffer) == 0:
+        return
+        
+    with data_lock:
+        # 시간 데이터 (상대적)
+        t = list(time_buffer)
+        
+        # 가속도 데이터
+        ax = list(accel_x_buffer)
+        ay = list(accel_y_buffer)
+        az = list(accel_z_buffer)
+        
+        # 자이로스코프 데이터
+        gx = list(gyro_x_buffer)
+        gy = list(gyro_y_buffer)
+        gz = list(gyro_z_buffer)
+    
+    # 데이터 업데이트
+    lines['accel_x'].set_data(t, ax)
+    lines['accel_y'].set_data(t, ay)
+    lines['accel_z'].set_data(t, az)
+    
+    lines['gyro_x'].set_data(t, gx)
+    lines['gyro_y'].set_data(t, gy)
+    lines['gyro_z'].set_data(t, gz)
+    
+    # x축 범위 자동 조정
+    if len(t) > 0:
+        for ax in axes:
+            ax.set_xlim(min(t), max(t))
+        
+        # y축 범위 자동 조정 (가속도)
+        if len(ax) > 0:
+            all_accel = ax + ay + az
+            min_val = min(all_accel) - 0.1
+            max_val = max(all_accel) + 0.1
+            axes[0].set_ylim(min_val, max_val)
+        
+        # y축 범위 자동 조정 (자이로스코프)
+        if len(gx) > 0:
+            all_gyro = gx + gy + gz
+            min_val = min(all_gyro) - 0.1
+            max_val = max(all_gyro) + 0.1
+            axes[1].set_ylim(min_val, max_val)
+    
+    # 그래프 갱신
+    fig.canvas.draw_idle()
+    fig.canvas.flush_events()
+
 def client_handler(client_socket, client_address):
-    global received_data, is_receiving
+    global received_data, is_receiving, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, plot_start_time
     
     print(f"클라이언트 연결됨: {client_address}")
     
     buffer = ""
     start_time = time.time()
     sample_count = 0
+    
+    # 시각화 초기화
+    if not visualization_active:
+        init_visualization_thread = threading.Thread(target=init_visualization)
+        init_visualization_thread.daemon = True
+        init_visualization_thread.start()
     
     try:
         is_receiving = True
@@ -63,6 +188,15 @@ def client_handler(client_socket, client_address):
                     # 데이터 저장
                     with data_lock:
                         received_data.append([timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
+                        
+                        # 시각화 버퍼에 데이터 추가
+                        time_buffer.append(timestamp)
+                        accel_x_buffer.append(accel_x)
+                        accel_y_buffer.append(accel_y)
+                        accel_z_buffer.append(accel_z)
+                        gyro_x_buffer.append(gyro_x)
+                        gyro_y_buffer.append(gyro_y)
+                        gyro_z_buffer.append(gyro_z)
                     
                     sample_count += 1
                     
@@ -148,6 +282,11 @@ def start_server():
         
         # 남은 데이터 저장
         save_received_data()
+        
+        # 시각화 창 닫기
+        if fig is not None:
+            plt.close(fig)
 
 if __name__ == "__main__":
+    print("IMU 데이터 수신 및 실시간 시각화 서버 시작")
     start_server() 
