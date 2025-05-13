@@ -6,13 +6,15 @@ import time
 import os
 import sys
 from collections import deque
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+import numpy as np
 
 # Server settings
 SERVER_IP = '0.0.0.0'  # Listen on all interfaces
 SERVER_PORT = 5000
 DATA_FOLDER = 'received_data'
+GRAPH_FOLDER = 'saved_graphs'  # 그래프 저장 폴더
 
 # Global variables
 received_data = []
@@ -51,6 +53,11 @@ def create_data_folder():
     if not os.path.exists(DATA_FOLDER):
         os.makedirs(DATA_FOLDER)
         print(f"Data folder created: {DATA_FOLDER}")
+    
+    # 그래프 저장 폴더 생성
+    if not os.path.exists(GRAPH_FOLDER):
+        os.makedirs(GRAPH_FOLDER)
+        print(f"Graph folder created: {GRAPH_FOLDER}")
 
 # Save received data to CSV
 def save_data():
@@ -182,6 +189,34 @@ def server_thread_func():
             server_socket.close()
             print("Server socket closed")
 
+# Save graphs to image file
+def save_graphs():
+    try:
+        # 타임스탬프로 파일명 생성
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(GRAPH_FOLDER, f"imu_graph_{timestamp}.png")
+        
+        # 화면에 출력된 그래프 영역 캡처
+        exporter = pg.exporters.ImageExporter(win.scene())
+        exporter.export(filename)
+        
+        print(f"Graphs saved to image: {filename}")
+    except Exception as e:
+        print(f"Error saving graphs: {e}")
+
+# 키 입력 처리 클래스
+class KeyPressWindow(pg.GraphicsLayoutWidget):
+    def __init__(self, **kwargs):
+        super(KeyPressWindow, self).__init__(**kwargs)
+        
+    def keyPressEvent(self, event):
+        # 'S' 키를 누르면 그래프 저장
+        if event.key() == QtCore.Qt.Key_S:
+            save_graphs()
+            print("Screenshot taken (pressed S key)")
+        else:
+            super(KeyPressWindow, self).keyPressEvent(event)
+
 # Exit handler
 def handle_exit():
     global is_running, server_socket
@@ -191,6 +226,9 @@ def handle_exit():
     
     # Save data
     save_data()
+    
+    # Save graphs
+    save_graphs()
     
     # Close socket
     if server_socket:
@@ -209,9 +247,13 @@ def main():
     # Setup PyQtGraph
     app = QtWidgets.QApplication([])
     
-    # Create window
-    win = pg.GraphicsLayoutWidget(show=True, title="IMU Data Monitoring")
+    # Create window with key press handling
+    win = KeyPressWindow(show=True, title="IMU Data Monitoring")
     win.resize(1000, 700)
+    
+    # 단축키 안내 추가
+    shortcut_label = pg.LabelItem(text="Press 'S' to save graphs as image", color='#ffffff')
+    win.addItem(shortcut_label, row=2, col=0)
     
     # Connect exit handler
     app.aboutToQuit.connect(handle_exit)
