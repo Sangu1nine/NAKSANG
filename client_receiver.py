@@ -6,15 +6,12 @@ import numpy as np
 import datetime
 import time
 import os
-import matplotlib
-# 스레드 관련 경고 해결을 위한 백엔드 설정
-matplotlib.use('TkAgg')  # GUI 백엔드 설정
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from collections import deque
 import signal
 import sys
 import queue
+from collections import deque
+from pyqtgraph.Qt import QtCore, QtWidgets
+import pyqtgraph as pg
 
 # Server settings
 SERVER_IP = '0.0.0.0'  # Listen on all network interfaces
@@ -37,15 +34,23 @@ gyro_x_buffer = deque(maxlen=buffer_size)
 gyro_y_buffer = deque(maxlen=buffer_size)
 gyro_z_buffer = deque(maxlen=buffer_size)
 
-# Plot object variables
-fig = None
-axes = None
-lines = {}
-plot_start_time = None
+# Add some initial data to prevent empty graphs
+for i in range(5):
+    time_buffer.append(i)
+    accel_x_buffer.append(0)
+    accel_y_buffer.append(0)
+    accel_z_buffer.append(0)
+    gyro_x_buffer.append(0)
+    gyro_y_buffer.append(0)
+    gyro_z_buffer.append(0)
+
+# PyQtGraph variables
+app = None
+win = None
+plots = {}
+curves = {}
 visualization_active = False
-animation = None  # Store animation object to stop it properly
 vis_queue = queue.Queue()  # Queue for visualization commands
-anim_ref = None  # Reference to keep animation alive
 
 # Server socket
 server_socket = None
@@ -58,7 +63,7 @@ def signal_handler(sig, frame):
 
 def shutdown_server():
     """Clean shutdown of the server"""
-    global is_receiving, server_socket, fig, animation
+    global is_receiving, server_socket, app
     
     # Stop receiving data
     is_receiving = False
@@ -68,21 +73,23 @@ def shutdown_server():
         try:
             server_socket.close()
             print("Server socket closed")
-        except:
-            pass
+        except Exception as e:
+            print(f"Error closing server socket: {str(e)}")
+        finally:
+            server_socket = None  # 소켓을 None으로 설정하여 재사용 방지
     
     # Save remaining data
     save_received_data()
     
     # Close visualization window
-    if fig is not None:
+    if app is not None:
         try:
-            # Stop animation
-            if animation is not None:
-                animation.event_source.stop()
-            plt.close(fig)
+            # PyQt 애플리케이션 종료
+            if hasattr(app, 'activeWindow') and app.activeWindow():
+                app.closeAllWindows()
             print("Visualization window closed")
-        except:
+        except Exception as e:
+            print(f"Error closing visualization: {str(e)}")
             pass
 
 def create_data_folder():
@@ -90,108 +97,124 @@ def create_data_folder():
         os.makedirs(DATA_FOLDER)
         print(f"Data folder created: {DATA_FOLDER}")
 
-# Function to be run in the main thread for visualization
-def visualization_handler():
-    global fig, axes, lines, animation, anim_ref, visualization_active
+class IMUVisualizer(QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        
+        # Create timer for real-time updates
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_plots)
+        self.timer.start(100)  # Update every 100ms
     
-    visualization_active = True
-    
-    # Create graphs
-    plt.ion()  # Enable interactive mode
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    fig.suptitle("IMU Data Real-time Monitoring", fontsize=16)
-    
-    # Configure acceleration graph
-    axes[0].set_title("Acceleration (g)")
-    axes[0].set_ylabel("Acceleration (g)")
-    axes[0].grid(True)
-    
-    # Configure gyroscope graph
-    axes[1].set_title("Gyroscope (°/s)")
-    axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel("Angular Velocity (°/s)")
-    axes[1].grid(True)
-    
-    # Create data lines
-    lines['accel_x'], = axes[0].plot([], [], 'r-', label='X-axis')
-    lines['accel_y'], = axes[0].plot([], [], 'g-', label='Y-axis')
-    lines['accel_z'], = axes[0].plot([], [], 'b-', label='Z-axis')
-    
-    lines['gyro_x'], = axes[1].plot([], [], 'r-', label='X-axis')
-    lines['gyro_y'], = axes[1].plot([], [], 'g-', label='Y-axis')
-    lines['gyro_z'], = axes[1].plot([], [], 'b-', label='Z-axis')
-    
-    # Add legends
-    axes[0].legend(loc='upper right')
-    axes[1].legend(loc='upper right')
-    
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    
-    # Set up animation for periodic updates - fix warning by specifying save_count
-    animation = FuncAnimation(fig, update_plot, interval=100, save_count=100)
-    
-    # Keep reference to prevent garbage collection
-    anim_ref = animation
-    
-    # Show plot with blocking to keep main thread in matplotlib's event loop
-    plt.show(block=False)
-    
-    return animation
+    def update_plots(self):
+        global time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer
+        
+        try:
+            with data_lock:
+                # Make copies of the data to avoid threading issues
+                t = list(time_buffer)
+                ax = list(accel_x_buffer)
+                ay = list(accel_y_buffer)
+                az = list(accel_z_buffer)
+                gx = list(gyro_x_buffer)
+                gy = list(gyro_y_buffer)
+                gz = list(gyro_z_buffer)
+            
+            # Update the curves
+            if len(t) > 0:
+                curves['accel_x'].setData(t, ax)
+                curves['accel_y'].setData(t, ay)
+                curves['accel_z'].setData(t, az)
+                
+                curves['gyro_x'].setData(t, gx)
+                curves['gyro_y'].setData(t, gy)
+                curves['gyro_z'].setData(t, gz)
+                
+                # Auto-range if needed
+                plots['accel'].enableAutoRange()
+                plots['gyro'].enableAutoRange()
+        
+        except Exception as e:
+            print(f"Error updating plots: {str(e)}")
 
-def update_plot(frame):
-    global time_buffer, fig, axes, lines
+# Function to be run in the main thread for visualization
+def start_visualization():
+    global app, win, plots, curves, visualization_active
     
-    # Skip if no data or server is shutting down
-    if len(time_buffer) == 0 or not is_receiving:
-        return
+    try:
+        print("Starting visualization...")
+        visualization_active = True
         
-    with data_lock:
-        # Time data (relative)
-        t = list(time_buffer)
+        # Create application and window
+        app = QtWidgets.QApplication([])
+        win = pg.GraphicsLayoutWidget(show=True, title="IMU Data Real-time Monitoring")
+        win.resize(1200, 800)
         
-        # Acceleration data
-        ax = list(accel_x_buffer)
-        ay = list(accel_y_buffer)
-        az = list(accel_z_buffer)
+        # Configure acceleration graph
+        plots['accel'] = win.addPlot(row=0, col=0)
+        plots['accel'].setLabel('left', "Acceleration", units='g')
+        plots['accel'].setLabel('bottom', "Time", units='s')
+        plots['accel'].setTitle("Acceleration (g)")
+        plots['accel'].addLegend()
+        plots['accel'].showGrid(x=True, y=True)
         
-        # Gyroscope data
-        gx = list(gyro_x_buffer)
-        gy = list(gyro_y_buffer)
-        gz = list(gyro_z_buffer)
+        # Configure gyroscope graph
+        win.nextRow()
+        plots['gyro'] = win.addPlot(row=1, col=0)
+        plots['gyro'].setLabel('left', "Angular Velocity", units='°/s')
+        plots['gyro'].setLabel('bottom', "Time", units='s')
+        plots['gyro'].setTitle("Gyroscope (°/s)")
+        plots['gyro'].addLegend()
+        plots['gyro'].showGrid(x=True, y=True)
+        
+        # Link X axes for simultaneous scrolling
+        plots['gyro'].setXLink(plots['accel'])
+        
+        # Create data curves with initial data
+        with data_lock:
+            t = list(time_buffer)
+            ax = list(accel_x_buffer)
+            ay = list(accel_y_buffer)
+            az = list(accel_z_buffer)
+            gx = list(gyro_x_buffer)
+            gy = list(gyro_y_buffer)
+            gz = list(gyro_z_buffer)
+        
+        # Create curves with different colors
+        curves['accel_x'] = pg.PlotDataItem(t, ax, pen=(255, 0, 0), name='X-axis')
+        curves['accel_y'] = pg.PlotDataItem(t, ay, pen=(0, 255, 0), name='Y-axis')
+        curves['accel_z'] = pg.PlotDataItem(t, az, pen=(0, 0, 255), name='Z-axis')
+        
+        curves['gyro_x'] = pg.PlotDataItem(t, gx, pen=(255, 0, 0), name='X-axis')
+        curves['gyro_y'] = pg.PlotDataItem(t, gy, pen=(0, 255, 0), name='Y-axis')
+        curves['gyro_z'] = pg.PlotDataItem(t, gz, pen=(0, 0, 255), name='Z-axis')
+        
+        # Add curves to plots
+        plots['accel'].addItem(curves['accel_x'])
+        plots['accel'].addItem(curves['accel_y'])
+        plots['accel'].addItem(curves['accel_z'])
+        
+        plots['gyro'].addItem(curves['gyro_x'])
+        plots['gyro'].addItem(curves['gyro_y'])
+        plots['gyro'].addItem(curves['gyro_z'])
+        
+        # Create visualizer object with timer for updates
+        visualizer = IMUVisualizer()
+        
+        print("Visualization initialized successfully")
+        
+        # Set window title
+        win.setWindowTitle("IMU Data Real-time Monitoring")
+        
+        return app, win
     
-    # Update data
-    if len(t) > 0:
-        lines['accel_x'].set_data(t, ax)
-        lines['accel_y'].set_data(t, ay)
-        lines['accel_z'].set_data(t, az)
-        
-        lines['gyro_x'].set_data(t, gx)
-        lines['gyro_y'].set_data(t, gy)
-        lines['gyro_z'].set_data(t, gz)
-        
-        # Auto-adjust x-axis range
-        for ax in axes:
-            ax.set_xlim(min(t), max(t))
-        
-        # Auto-adjust y-axis range (acceleration)
-        if len(ax) > 0:
-            all_accel = ax + ay + az
-            min_val = min(all_accel) - 0.1
-            max_val = max(all_accel) + 0.1
-            axes[0].set_ylim(min_val, max_val)
-        
-        # Auto-adjust y-axis range (gyroscope)
-        if len(gx) > 0:
-            all_gyro = gx + gy + gz
-            min_val = min(all_gyro) - 0.1
-            max_val = max(all_gyro) + 0.1
-            axes[1].set_ylim(min_val, max_val)
-    
-    # Update is handled automatically by FuncAnimation
+    except Exception as e:
+        print(f"Error in visualization_handler: {str(e)}")
+        visualization_active = False
+        return None, None
 
 def client_handler(client_socket, client_address):
-    global received_data, is_receiving, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, plot_start_time, vis_queue
+    global received_data, is_receiving, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, vis_queue
     
     print(f"Client connected: {client_address}")
     
@@ -297,7 +320,7 @@ def save_received_data():
         received_data = []
 
 def start_server():
-    global is_receiving, server_socket, vis_queue, anim_ref
+    global is_receiving, server_socket, vis_queue, app, win
     
     # Register signal handler for Ctrl+C
     signal.signal(signal.SIGINT, signal_handler)
@@ -305,11 +328,12 @@ def start_server():
     # Create data folder
     create_data_folder()
     
-    # Create server socket
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
     try:
+        # Create server socket
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Bind and listen
         server_socket.bind((SERVER_IP, SERVER_PORT))
         server_socket.settimeout(0.5)  # Add timeout to allow checking for shutdown
         server_socket.listen(1)
@@ -319,17 +343,67 @@ def start_server():
         
         is_receiving = True
         
+        # Check if we need to start visualization immediately
+        if not vis_queue.empty():
+            vis_queue.get()
+            app, win = start_visualization()
+        
+        # Start server loop in a separate thread
+        server_thread = threading.Thread(target=server_loop)
+        server_thread.daemon = True
+        server_thread.start()
+        
+        # If PyQtGraph app is running, enter its event loop
+        if app is not None:
+            try:
+                app.exec_()
+            except Exception as e:
+                print(f"Error in Qt event loop: {str(e)}")
+        else:
+            # GUI가 실행되지 않은 경우 기본 루프로 대기
+            try:
+                while is_receiving:
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                print("\nServer shutdown requested (KeyboardInterrupt)")
+        
+        # 종료시 정리
+        shutdown_server()
+        
+    except socket.error as e:
+        print(f"Socket error during server startup: {str(e)}")
+        shutdown_server()
+    except KeyboardInterrupt:
+        # This is a backup handler
+        print("\nServer shutdown requested (KeyboardInterrupt)")
+        shutdown_server()
+    except Exception as e:
+        print(f"Server error: {str(e)}")
+        shutdown_server()
+
+def server_loop():
+    global is_receiving, server_socket, vis_queue, app, win
+    
+    try:
         while is_receiving:
             # Check if we need to start visualization
             try:
                 if not vis_queue.empty():
                     vis_queue.get()
-                    # Start visualization in the main thread
-                    anim_ref = visualization_handler()
+                    # We can't start visualization from non-main thread
+                    # Just notify user they need to restart
+                    print("Visualization requested but can't be started from a thread")
+                    print("Please restart the application")
             except Exception as e:
                 print(f"Visualization error: {str(e)}")
                 
             try:
+                # 소켓 상태 확인
+                if server_socket is None:
+                    print("Server socket is no longer valid")
+                    is_receiving = False
+                    break
+                    
                 print("Waiting for client connection...")
                 client_socket, client_address = server_socket.accept()
                 
@@ -345,27 +419,28 @@ def start_server():
                 print("\nServer shutdown requested (Ctrl+C caught in accept)")
                 is_receiving = False
                 break
+            except OSError as e:
+                if not is_receiving:
+                    # 서버가 종료 중일 때는 예외를 무시함
+                    break
+                print(f"Socket error: {str(e)}")
+                # 소켓 오류가 발생하면 루프를 벗어남
+                is_receiving = False
+                break
             except Exception as e:
                 print(f"Error accepting connection: {str(e)}")
                 if is_receiving:
                     # Wait a bit before retrying
                     time.sleep(0.5)
             
-            # Update the plot if it's active
-            if visualization_active and fig is not None:
-                try:
-                    plt.pause(0.01)  # Allow GUI events to be processed
-                except:
-                    pass
-            
     except KeyboardInterrupt:
         # This is a backup handler
         print("\nServer shutdown requested (KeyboardInterrupt)")
     except Exception as e:
-        print(f"Server error: {str(e)}")
+        print(f"Server loop error: {str(e)}")
     finally:
-        # Shutdown server
-        shutdown_server()
+        # 마지막 청소 작업
+        is_receiving = False
 
 if __name__ == "__main__":
     print("IMU Data Reception and Real-time Visualization Server Started")
