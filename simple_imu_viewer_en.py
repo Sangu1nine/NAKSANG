@@ -38,6 +38,7 @@ import datetime
 import time
 import os
 import sys
+import signal
 from collections import deque
 from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
@@ -56,6 +57,7 @@ fall_events = []  # 낙상 감지 이벤트 저장
 fall_event_queue = []  # 낙상 이벤트 UI 업데이트를 위한 큐
 data_lock = threading.Lock()
 is_running = False
+start_time = time.time()  # 프로그램 시작 시간 저장
 
 # Data buffers for visualization
 buffer_size = 500  # Keep only the most recent 500 data points
@@ -176,7 +178,7 @@ def add_fall_marker(timestamp):
 
 # Client connection handler
 def handle_client(client_socket, address):
-    global received_data, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer
+    global received_data, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, start_time
     
     print(f"Client connected: {address}")
     buffer = ""
@@ -206,7 +208,10 @@ def handle_client(client_socket, address):
                     # 일반 센서 데이터인 경우
                     if 'accel' in data_json and 'gyro' in data_json:
                         # Extract data
-                        timestamp = data_json['timestamp']
+                        # get_data.py에서 elapsed 시간을 보내므로 이를 실제 타임스탬프로 변환
+                        elapsed_time = data_json['timestamp']
+                        timestamp = start_time + elapsed_time  # 실제 유닉스 타임스탬프로 변환
+                        
                         accel_x = data_json['accel']['x']
                         accel_y = data_json['accel']['y']
                         accel_z = data_json['accel']['z']
@@ -317,6 +322,11 @@ def server_thread_func():
                 client_thread.start()
             except socket.timeout:
                 continue
+            except OSError:
+                # Socket closed - expected during shutdown
+                if is_running:
+                    print("Server socket closed")
+                break
             except Exception as e:
                 if is_running:
                     print(f"Connection accept error: {e}")
@@ -327,8 +337,11 @@ def server_thread_func():
     
     finally:
         if server_socket:
-            server_socket.close()
-            print("Server socket closed")
+            try:
+                server_socket.close()
+            except:
+                pass
+            print("Server thread terminated")
 
 # Save graphs to image file
 def save_graphs():
@@ -362,25 +375,45 @@ class KeyPressWindow(pg.GraphicsLayoutWidget):
 def handle_exit():
     global is_running, server_socket
     
+    print("\nExit requested - cleaning up...")
     is_running = False
-    print("\nExit requested")
     
     # Save data
+    print("Saving data...")
     save_data()
     
     # Save graphs
+    print("Saving graphs...")
     save_graphs()
     
     # Close socket
     if server_socket:
         try:
             server_socket.close()
+            print("Server socket closed")
         except:
             pass
+    
+    print("Cleanup completed")
+
+# Signal handler for Ctrl+C
+def signal_handler(signum, frame):
+    print("\nCtrl+C detected - shutting down gracefully...")
+    handle_exit()
+    if app:
+        app.quit()
+    sys.exit(0)
 
 # Main function
 def main():
-    global app, win, plots, curves, is_running
+    global app, win, plots, curves, is_running, start_time
+    
+    # Signal handler 등록
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # 프로그램 시작 시간 기록
+    start_time = time.time()
     
     # Create folder
     create_data_folder()
@@ -401,7 +434,7 @@ def main():
     win.addItem(plots['fall_list'], row=0, col=1, rowspan=2)
     
     # 단축키 안내 추가 (텍스트 색상 검은색으로 변경)
-    shortcut_label = pg.LabelItem(text="Press 'S' to save graphs as image", color='#000000')
+    shortcut_label = pg.LabelItem(text="Press 'S' to save graphs as image, Ctrl+C to exit", color='#000000')
     win.addItem(shortcut_label, row=3, col=0)
     
     # 낙상 감지 상태 레이블 추가 (텍스트 색상 유지)
@@ -418,7 +451,7 @@ def main():
     plots['accel'].setLabel('bottom', "Time", "")  # 단위 제거
     plots['accel'].addLegend()
     plots['accel'].showGrid(x=True, y=True)
-    plots['accel'].setYRange(-2, 2)  # 가속도 그래프 Y축 고정 (-2g ~ +2g)
+    plots['accel'].setYRange(-1, 1)  # 가속도 그래프 Y축 고정 (-1g ~ +1g)
     plots['accel'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
     
     # 시간 축 형식 설정 (추가)
@@ -432,7 +465,7 @@ def main():
     plots['gyro'].setLabel('bottom', "Time", "")  # 단위 제거
     plots['gyro'].addLegend()
     plots['gyro'].showGrid(x=True, y=True)
-    plots['gyro'].setYRange(-250, 250)  # 자이로스코프 그래프 Y축 고정 (-250°/s ~ +250°/s)
+    plots['gyro'].setYRange(-125, 125)  # 자이로스코프 그래프 Y축 고정 (-125°/s ~ +125°/s)
     plots['gyro'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
     
     # 시간 축 형식 설정 (추가)
@@ -463,15 +496,22 @@ def main():
     
     # Start GUI event loop
     print("IMU Data Reception and Fall Detection Visualization Started")
-    sys.exit(app.exec_())
+    print("Press Ctrl+C to stop and save data")
+    
+    try:
+        sys.exit(app.exec_())
+    except SystemExit:
+        handle_exit()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print("\nTerminated by keyboard interrupt")
+        handle_exit()
     except Exception as e:
         print(f"Unexpected error: {e}")
+        handle_exit()
     finally:
         # Final cleanup
         is_running = False
