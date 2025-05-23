@@ -206,7 +206,7 @@ def save_received_data():
             return
             
         # DataFrame 생성
-        columns = ['Time(s)', 'AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+        columns = ['Timestamp', 'AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
         df = pd.DataFrame(received_data, columns=columns)
         
         # 파일명 설정

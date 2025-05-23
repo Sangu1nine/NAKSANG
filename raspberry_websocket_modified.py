@@ -1,20 +1,20 @@
 """
 =============================================================================
-파일명: Raspberry_with_realtime_transmission.py
-설명: MPU6050 센서를 이용한 실시간 낙상 감지 및 WiFi 데이터 전송 시스템
+파일명: Raspberry_with_realtime_transmission_websocket.py
+설명: MPU6050 센서를 이용한 실시간 낙상 감지 및 WebSocket 데이터 전송 시스템
 
 이 시스템은 라즈베리파이에서 MPU6050 센서의 가속도계와 자이로스코프 데이터를
-실시간으로 수집하여 낙상을 감지하고, 감지된 데이터를 WiFi를 통해 서버로 전송합니다.
+실시간으로 수집하여 낙상을 감지하고, 감지된 데이터를 WebSocket을 통해 서버로 전송합니다.
 
 주요 기능:
 - MPU6050 센서 데이터 실시간 수집 (100Hz)
 - 데이터 정규화 및 전처리
 - TensorFlow Lite 모델을 사용한 낙상 감지
-- WiFi를 통한 실시간 센서 데이터 전송
+- WebSocket을 통한 실시간 센서 데이터 전송
 - 낙상 감지 시 알람 및 이벤트 전송
 
 개발자: NAKSANG 프로젝트팀
-버전: 1.0
+버전: 2.0 (WebSocket 지원)
 =============================================================================
 """
 
@@ -26,9 +26,10 @@ import signal
 import sys
 import pickle
 import os
-import socket
 import json
 import threading
+import asyncio
+import websockets
 
 try:
     from smbus2 import SMBus
@@ -56,68 +57,104 @@ sensitive_accel = 16384.0  # ±2g range: 16384 LSB/g
 # Model settings
 MODEL_PATH = 'models/fall_detection.tflite'
 SEQ_LENGTH = 150  # Sequence length 
-STRIDE = 25      # Prediction interval (predict every 25 data points)
+STRIDE = 5      # Prediction interval (predict every 25 data points)
 N_FEATURES = 6   # Number of features (AccX, AccY, AccZ, GyrX, GyrY, GyrZ)
 SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
-# WiFi 통신 설정
-WIFI_SERVER_IP = '192.168.0.177'  # 로컬 PC의 IP 주소 (변경 필요)
-WIFI_SERVER_PORT = 8000  # 통신 포트
+# WebSocket 통신 설정
+WEBSOCKET_SERVER_IP = '192.168.0.177'  # 로컬 PC의 IP 주소 (변경 필요)
+WEBSOCKET_SERVER_PORT = 8000  # 통신 포트
+USER_ID = "raspberry_pi_01"  # 라즈베리파이 고유 사용자 ID (변경 가능)
 
 # Scalers directory
 SCALERS_DIR = 'scalers'
 
 # 데이터 전송 관련 변수
-wifi_client = None
-wifi_connected = False
+websocket_client = None
+websocket_connected = False
 send_data_queue = []
+data_queue_lock = threading.Lock()
 
-# WiFi 연결 함수
-def connect_wifi():
-    """WiFi 서버에 연결"""
-    global wifi_client, wifi_connected
-    try:
-        wifi_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        wifi_client.connect((WIFI_SERVER_IP, WIFI_SERVER_PORT))
-        wifi_connected = True
-        print(f"WiFi connection successful: {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}")
-        return True
-    except Exception as e:
-        print(f"WiFi connection failed: {str(e)}")
-        wifi_connected = False
-        return False
+# WebSocket 연결 URL 생성
+def get_websocket_url():
+    """WebSocket 연결 URL 생성"""
+    return f"ws://{WEBSOCKET_SERVER_IP}:{WEBSOCKET_SERVER_PORT}/ws/{USER_ID}"
 
-# 데이터 전송 스레드 함수
-def send_data_thread():
-    """데이터 전송 스레드"""
-    global send_data_queue, wifi_client, wifi_connected
+# WebSocket 연결 및 데이터 전송 (비동기)
+async def websocket_handler():
+    """WebSocket 연결 및 데이터 전송 처리"""
+    global websocket_client, websocket_connected, send_data_queue
     
-    while wifi_connected:
-        if len(send_data_queue) > 0:
-            try:
-                # 큐에서 데이터 가져오기
-                sensor_data = send_data_queue.pop(0)
-                # JSON 형식으로 변환하여 전송
-                data_json = json.dumps(sensor_data)
-                wifi_client.sendall((data_json + '\n').encode('utf-8'))
-            except Exception as e:
-                print(f"Data transmission error: {str(e)}")
-                wifi_connected = False
-                break
-        else:
-            time.sleep(0.001)  # 큐가 비어있을 때 CPU 사용량 줄이기
+    ws_url = get_websocket_url()
+    print(f"WebSocket 연결 시도: {ws_url}")
+    
+    try:
+        async with websockets.connect(ws_url) as websocket:
+            websocket_connected = True
+            websocket_client = websocket
+            print(f"WebSocket 연결 성공: {ws_url}")
+            
+            # 데이터 전송 루프
+            while websocket_connected:
+                with data_queue_lock:
+                    if len(send_data_queue) > 0:
+                        # 큐에서 데이터 가져오기
+                        sensor_data = send_data_queue.pop(0)
+                        
+                        try:
+                            # JSON 형식으로 변환하여 전송
+                            data_json = json.dumps(sensor_data)
+                            await websocket.send(data_json)
+                        except Exception as e:
+                            print(f"데이터 전송 오류: {str(e)}")
+                            break
+                
+                await asyncio.sleep(0.001)  # 짧은 대기
+                
+    except websockets.exceptions.ConnectionClosed:
+        print("WebSocket 연결이 종료되었습니다.")
+    except Exception as e:
+        print(f"WebSocket 연결 실패: {str(e)}")
+    finally:
+        websocket_connected = False
+        websocket_client = None
 
-# WiFi 연결 종료 함수
-def close_wifi():
-    """WiFi 연결 종료"""
-    global wifi_client, wifi_connected
-    if wifi_client:
+# WebSocket 클라이언트 시작 (별도 스레드에서 실행)
+def start_websocket_client():
+    """WebSocket 클라이언트를 새 이벤트 루프에서 시작"""
+    try:
+        # 새 이벤트 루프 생성
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # WebSocket 연결 시도
+        loop.run_until_complete(websocket_handler())
+    except Exception as e:
+        print(f"WebSocket 스레드 오류: {str(e)}")
+    finally:
         try:
-            wifi_client.close()
-            print("WiFi connection closed")
+            loop.close()
         except:
             pass
-    wifi_connected = False
+
+# 데이터 큐에 추가하는 함수
+def add_data_to_queue(data):
+    """데이터를 전송 큐에 안전하게 추가"""
+    global send_data_queue
+    
+    with data_queue_lock:
+        send_data_queue.append(data)
+        
+        # 큐 크기 제한 (메모리 보호)
+        if len(send_data_queue) > 1000:
+            send_data_queue.pop(0)  # 오래된 데이터 제거
+
+# WebSocket 연결 종료 함수
+def close_websocket():
+    """WebSocket 연결 종료"""
+    global websocket_connected
+    websocket_connected = False
+    print("WebSocket 연결 종료")
 
 # Load scaler functions
 def load_scalers():
@@ -139,7 +176,7 @@ def load_scalers():
     
     return scalers
 
-# MPU6050 sensor class
+# MPU6050 sensor class (기존과 동일)
 class MPU6050Sensor:
     def __init__(self, scalers=None):
         """Initialize IMU sensor (MPU6050) and I2C settings"""
@@ -235,7 +272,7 @@ class MPU6050Sensor:
         # Return converted data
         return converted_data
 
-# Fall detector class
+# Fall detector class (기존과 동일)
 class FallDetector:
     def __init__(self, model_path, seq_length=50, stride=10, n_features=6):
         """Initialize fall detection model"""
@@ -330,7 +367,7 @@ class FallDetector:
 
 def main():
     """Main function"""
-    print("Fall detection system started")
+    print("Fall detection system started (WebSocket version)")
     
     try:
         # Load scalers
@@ -357,19 +394,19 @@ def main():
         # Ctrl+C signal handler
         def signal_handler(sig, frame):
             print("\nProgram ended")
-            close_wifi()
+            close_websocket()
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
         
-        # WiFi connection attempt
-        wifi_thread = None
-        if connect_wifi():
-            # Start data transmission thread
-            wifi_thread = threading.Thread(target=send_data_thread)
-            wifi_thread.daemon = True
-            wifi_thread.start()
-            print("Started WiFi data transmission thread")
+        # WebSocket 클라이언트 시작 (별도 스레드)
+        websocket_thread = threading.Thread(target=start_websocket_client)
+        websocket_thread.daemon = True
+        websocket_thread.start()
+        print("Started WebSocket client thread")
+        
+        # 연결 대기
+        time.sleep(2)
         
         # Fall detection loop
         print("Collecting sensor data...")
@@ -380,14 +417,14 @@ def main():
             data = sensor.get_data()
             detector.add_data_point(data)
             
-            # Send data to WiFi (if connected)
-            if wifi_connected:
+            # Send data to WebSocket (if connected)
+            if websocket_connected:
                 sensor_data = {
                     'timestamp': time.time(),
                     'accel': {'x': float(data[0]), 'y': float(data[1]), 'z': float(data[2])},
                     'gyro': {'x': float(data[3]), 'y': float(data[4]), 'z': float(data[5])}
                 }
-                send_data_queue.append(sensor_data)
+                add_data_to_queue(sensor_data)
             
             time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
         
@@ -401,24 +438,26 @@ def main():
             # Read sensor data
             data = sensor.get_data()
             
-            # Send data to WiFi (if connected)
-            if wifi_connected:
+            # Send data to WebSocket (if connected)
+            if websocket_connected:
                 sensor_data = {
                     'timestamp': time.time(),
                     'accel': {'x': float(data[0]), 'y': float(data[1]), 'z': float(data[2])},
                     'gyro': {'x': float(data[3]), 'y': float(data[4]), 'z': float(data[5])}
                 }
-                send_data_queue.append(sensor_data)
+                add_data_to_queue(sensor_data)
             
             # Debug output (once per second)
             current_time = time.time()
             if current_time - last_time >= 1.0:
                 print(f"Acceleration (g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
                 print(f"Gyroscope (°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
-                if wifi_connected:
-                    print(f"WiFi transmission status: Connected (queue length: {len(send_data_queue)})")
+                if websocket_connected:
+                    with data_queue_lock:
+                        queue_length = len(send_data_queue)
+                    print(f"WebSocket transmission status: Connected (queue length: {queue_length})")
                 else:
-                    print("WiFi transmission status: Not connected")
+                    print("WebSocket transmission status: Not connected")
                 last_time = current_time
             
             # Add to data buffer
@@ -436,13 +475,13 @@ def main():
                     alarm_start_time = current_time
                     
                     # Send fall detection information
-                    if wifi_connected:
+                    if websocket_connected:
                         fall_event = {
                             'event': 'fall_detected',
                             'timestamp': current_time,
                             'probability': result['fall_probability']
                         }
-                        send_data_queue.append(fall_event)
+                        add_data_to_queue(fall_event)
             
             # Automatically turn off alarm after 3 seconds
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
@@ -455,12 +494,12 @@ def main():
             
     except KeyboardInterrupt:
         print("\nProgram ended")
-        close_wifi()
+        close_websocket()
     except Exception as e:
         print(f"Error occurred: {str(e)}")
         import traceback
         traceback.print_exc()
-        close_wifi()
+        close_websocket()
 
 if __name__ == "__main__":
     main() 

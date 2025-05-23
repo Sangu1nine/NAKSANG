@@ -53,6 +53,7 @@ FALL_LOG_FILE = os.path.join(DATA_FOLDER, 'fall_events.csv')  # 낙상 이벤트
 # Global variables
 received_data = []
 fall_events = []  # 낙상 감지 이벤트 저장
+fall_event_queue = []  # 낙상 이벤트 UI 업데이트를 위한 큐
 data_lock = threading.Lock()
 is_running = False
 
@@ -160,16 +161,18 @@ def add_fall_marker(timestamp):
     acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
     gyr_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
     
-    # 텍스트 추가 (흰색 배경에 맞게 빨간색 유지)
+    # 텍스트 추가 (고정된 X,Y 위치에 표시)
     time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')
-    acc_text = pg.TextItem(text=f"FALL! {time_str}", color=(255, 0, 0), anchor=(0, 0))
-    acc_text.setPos(timestamp, plots['accel'].getViewBox().viewRange()[1][1])
     
-    # 저장 및 그래프에 추가
-    fall_markers.append((acc_line, gyr_line, acc_text))
+    # 낙상 이벤트 정보 저장 (메인 스레드에서 UI 업데이트를 위해)
+    with data_lock:
+        # 시간 정보와 함께 낙상 이벤트 큐에 추가
+        fall_event_queue.append(time_str)
+    
+    # 그래프에는 선만 표시 (UI 요소는 아님)
+    fall_markers.append((acc_line, gyr_line))
     plots['accel'].addItem(acc_line)
     plots['gyro'].addItem(gyr_line)
-    plots['accel'].addItem(acc_text)
 
 # Client connection handler
 def handle_client(client_socket, address):
@@ -236,6 +239,8 @@ def handle_client(client_socket, address):
 
 # Update plot function (called by timer)
 def update_plots():
+    global fall_event_queue
+    
     with data_lock:
         t = list(time_buffer)
         ax = list(accel_x_buffer)
@@ -244,20 +249,52 @@ def update_plots():
         gx = list(gyro_x_buffer)
         gy = list(gyro_y_buffer)
         gz = list(gyro_z_buffer)
+        
+        # 낙상 이벤트 큐에서 이벤트 가져오기
+        local_fall_events = list(fall_event_queue)
+        fall_event_queue.clear()
+    
+    # 낙상 이벤트가 있으면 UI 업데이트 (메인 스레드에서 수행)
+    if local_fall_events:
+        for time_str in local_fall_events:
+            # 낙상 이벤트 목록에 시간 추가
+            fall_label = plots['fall_list']
+            current_text = fall_label.text
+            new_text = current_text + f"\n• {time_str} - 낙상 감지됨"
+            fall_label.setText(new_text)
     
     if len(t) > 0:
-        curves['accel_x'].setData(t, ax)
+        # 시간 형식 변환 - 유닉스 타임스탬프를 시:분:초.밀리초 형식으로 변환
+        formatted_times = []
+        for timestamp in t:
+            dt = datetime.datetime.fromtimestamp(timestamp)
+            formatted_times.append(dt.strftime('%H:%M:%S.%f')[:-3])  # 밀리초까지만 표시
+        
+        # 데이터 업데이트
+        curves['accel_x'].setData(t, ax)  # X축은 원래 타임스탬프 유지 (내부 계산용)
         curves['accel_y'].setData(t, ay)
         curves['accel_z'].setData(t, az)
         curves['gyro_x'].setData(t, gx)
         curves['gyro_y'].setData(t, gy)
         curves['gyro_z'].setData(t, gz)
         
-        # 모든 폴 마커의 위치 조정 (그래프 스케일 변경 시에도 텍스트 위치가 적절하게 표시되도록)
-        for marker in fall_markers:
-            _, _, text_item = marker
-            if text_item in plots['accel'].items:
-                text_item.setPos(text_item.x(), plots['accel'].getViewBox().viewRange()[1][1])
+        # 자동 X축 범위 조정
+        if len(t) > 1:
+            x_min = max(min(t), t[-1] - 10)  # 최근 10초 데이터만 표시
+            x_max = t[-1] + 0.5  # 약간의 여백 추가
+            plots['accel'].setXRange(x_min, x_max, padding=0)
+            
+        # X축 눈금 형식 설정 (보기 쉽게 시간으로 표시)
+        def format_time_axis(x):
+            try:
+                dt = datetime.datetime.fromtimestamp(x)
+                return dt.strftime('%H:%M:%S')
+            except:
+                return ''
+            
+        # X축 눈금 형식 설정
+        plots['accel'].getAxis('bottom').setTicks([[(t[i], format_time_axis(t[i])) for i in range(0, len(t), len(t)//5) if i < len(t)]])
+        plots['gyro'].getAxis('bottom').setTicks([[(t[i], format_time_axis(t[i])) for i in range(0, len(t), len(t)//5) if i < len(t)]])
 
 # Server thread function
 def server_thread_func():
@@ -359,6 +396,10 @@ def main():
     win = KeyPressWindow(show=True, title="IMU Data Monitoring with Fall Detection")
     win.resize(1000, 700)
     
+    # 낙상 이벤트 리스트를 표시할 레이블 추가
+    plots['fall_list'] = pg.LabelItem(text="낙상 감지 기록:", color='#aa0000')
+    win.addItem(plots['fall_list'], row=0, col=1, rowspan=2)
+    
     # 단축키 안내 추가 (텍스트 색상 검은색으로 변경)
     shortcut_label = pg.LabelItem(text="Press 'S' to save graphs as image", color='#000000')
     win.addItem(shortcut_label, row=3, col=0)
@@ -374,18 +415,28 @@ def main():
     plots['accel'] = win.addPlot(row=0, col=0)
     plots['accel'].setTitle("Acceleration (g)")
     plots['accel'].setLabel('left', "Acceleration", "g")
-    plots['accel'].setLabel('bottom', "Time", "s")
+    plots['accel'].setLabel('bottom', "Time", "")  # 단위 제거
     plots['accel'].addLegend()
     plots['accel'].showGrid(x=True, y=True)
+    plots['accel'].setYRange(-2, 2)  # 가속도 그래프 Y축 고정 (-2g ~ +2g)
+    plots['accel'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
+    
+    # 시간 축 형식 설정 (추가)
+    plots['accel'].getAxis('bottom').setStyle(tickTextOffset=15)  # 시간 레이블과 축 사이 간격 늘림
     
     # Gyroscope graph
     win.nextRow()
     plots['gyro'] = win.addPlot(row=1, col=0)
     plots['gyro'].setTitle("Gyroscope (°/s)")
     plots['gyro'].setLabel('left', "Angular Velocity", "°/s")
-    plots['gyro'].setLabel('bottom', "Time", "s")
+    plots['gyro'].setLabel('bottom', "Time", "")  # 단위 제거
     plots['gyro'].addLegend()
     plots['gyro'].showGrid(x=True, y=True)
+    plots['gyro'].setYRange(-250, 250)  # 자이로스코프 그래프 Y축 고정 (-250°/s ~ +250°/s)
+    plots['gyro'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
+    
+    # 시간 축 형식 설정 (추가)
+    plots['gyro'].getAxis('bottom').setStyle(tickTextOffset=15)  # 시간 레이블과 축 사이 간격 늘림
     
     # Link X axes for simultaneous scrolling
     plots['gyro'].setXLink(plots['accel'])

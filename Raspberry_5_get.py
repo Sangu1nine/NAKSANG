@@ -62,7 +62,7 @@ SAMPLING_RATE = 100  # Hz - sampling rate is set to 100Hz
 
 # WiFi 통신 설정
 WIFI_SERVER_IP = '192.168.0.177'  # 로컬 PC의 IP 주소 (변경 필요)
-WIFI_SERVER_PORT = 5000  # 통신 포트
+WIFI_SERVER_PORT = 8000  # 통신 포트
 
 # Scalers directory
 SCALERS_DIR = 'scalers'
@@ -80,10 +80,10 @@ def connect_wifi():
         wifi_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         wifi_client.connect((WIFI_SERVER_IP, WIFI_SERVER_PORT))
         wifi_connected = True
-        print(f"WiFi 연결 성공: {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}")
+        print(f"WiFi connection successful: {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}")
         return True
     except Exception as e:
-        print(f"WiFi 연결 실패: {str(e)}")
+        print(f"WiFi connection failed: {str(e)}")
         wifi_connected = False
         return False
 
@@ -101,7 +101,7 @@ def send_data_thread():
                 data_json = json.dumps(sensor_data)
                 wifi_client.sendall((data_json + '\n').encode('utf-8'))
             except Exception as e:
-                print(f"데이터 전송 오류: {str(e)}")
+                print(f"Data transmission error: {str(e)}")
                 wifi_connected = False
                 break
         else:
@@ -114,7 +114,7 @@ def close_wifi():
     if wifi_client:
         try:
             wifi_client.close()
-            print("WiFi 연결 종료")
+            print("WiFi connection closed")
         except:
             pass
     wifi_connected = False
@@ -150,7 +150,7 @@ class MPU6050Sensor:
         self.setup_mpu6050()
         self.frame_counter = 0
         self.scalers = scalers
-        print("MPU6050 센서 초기화 완료")
+        print("MPU6050 sensor initialized")
     
     def setup_mpu6050(self):
         """MPU6050 sensor initial setup"""
@@ -250,9 +250,9 @@ class FallDetector:
         self.interpreter = self.load_model(model_path)
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-        print("모델 로딩 완료")
-        print(f"입력 형태: {self.input_details[0]['shape']}")
-        print(f"출력 형태: {self.output_details[0]['shape']}")
+        print("Model loading completed")
+        print(f"Input shape: {self.input_details[0]['shape']}")
+        print(f"Output shape: {self.output_details[0]['shape']}")
     
     def load_model(self, model_path):
         """Load TFLite model"""
@@ -261,7 +261,7 @@ class FallDetector:
             interpreter.allocate_tensors()
             return interpreter
         except Exception as e:
-            print(f"모델 로딩 오류: {str(e)}")
+            print(f"Model loading error: {str(e)}")
             raise
     
     def add_data_point(self, data_array):
@@ -311,7 +311,7 @@ class FallDetector:
                 'fall_probability': float(fall_prob)
             }
         except Exception as e:
-            print(f"예측 중 오류 발생: {str(e)}")
+            print(f"Prediction error: {str(e)}")
             return None
     
     def trigger_alarm(self):
@@ -326,24 +326,24 @@ class FallDetector:
         """Stop alarm"""
         if self.alarm_active:
             self.alarm_active = False
-            print("알람 중지")
+            print("Alarm stopped")
 
 def main():
     """Main function"""
-    print("낙상 감지 시스템 시작")
+    print("Fall detection system started")
     
     try:
         # Load scalers
-        print("스케일러 로딩 중...")
+        print("Loading scalers...")
         scalers = load_scalers()
-        print(f"{len(scalers)}개 스케일러 로드 완료")
+        print(f"{len(scalers)} scalers loaded")
         
         # Initialize sensor
         try:
             sensor = MPU6050Sensor(scalers=scalers)
         except Exception as e:
-            print(f"센서 초기화 실패: {e}")
-            print("프로그램 종료.")
+            print(f"Sensor initialization failed: {e}")
+            print("Program ended.")
             return
         
         # Initialize fall detector
@@ -356,31 +356,31 @@ def main():
         
         # Ctrl+C signal handler
         def signal_handler(sig, frame):
-            print("\n프로그램 종료")
+            print("\nProgram ended")
             close_wifi()
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
         
-        # WiFi 연결 시도
+        # WiFi connection attempt
         wifi_thread = None
         if connect_wifi():
-            # 데이터 전송 스레드 시작
+            # Start data transmission thread
             wifi_thread = threading.Thread(target=send_data_thread)
             wifi_thread.daemon = True
             wifi_thread.start()
-            print("WiFi 데이터 전송 스레드 시작")
+            print("Started WiFi data transmission thread")
         
         # Fall detection loop
-        print("센서 데이터 수집 중...")
+        print("Collecting sensor data...")
         
         # Fill initial data buffer
-        print(f"초기 데이터 버퍼 채우는 중 ({SEQ_LENGTH} 샘플)...")
+        print(f"Filling initial data buffer ({SEQ_LENGTH} samples)...")
         for _ in range(SEQ_LENGTH):
             data = sensor.get_data()
             detector.add_data_point(data)
             
-            # WiFi로 데이터 전송 (연결된 경우)
+            # Send data to WiFi (if connected)
             if wifi_connected:
                 sensor_data = {
                     'timestamp': time.time(),
@@ -391,7 +391,7 @@ def main():
             
             time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
         
-        print("실시간 낙상 감지 시작됨")
+        print("Fall detection started")
         
         # Main detection loop
         last_time = time.time()
@@ -401,7 +401,7 @@ def main():
             # Read sensor data
             data = sensor.get_data()
             
-            # WiFi로 데이터 전송 (연결된 경우)
+            # Send data to WiFi (if connected)
             if wifi_connected:
                 sensor_data = {
                     'timestamp': time.time(),
@@ -413,12 +413,12 @@ def main():
             # Debug output (once per second)
             current_time = time.time()
             if current_time - last_time >= 1.0:
-                print(f"가속도(g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
-                print(f"자이로스코프(°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
+                print(f"Acceleration (g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
+                print(f"Gyroscope (°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
                 if wifi_connected:
-                    print(f"WiFi 전송 상태: 연결됨 (큐 길이: {len(send_data_queue)})")
+                    print(f"WiFi transmission status: Connected (queue length: {len(send_data_queue)})")
                 else:
-                    print("WiFi 전송 상태: 연결 안됨")
+                    print("WiFi transmission status: Not connected")
                 last_time = current_time
             
             # Add to data buffer
@@ -431,11 +431,11 @@ def main():
                 
                 # If result exists and fall is predicted
                 if result and result['prediction'] == 1:
-                    print(f"낙상 감지! 확률: {result['fall_probability']:.2%}")
+                    print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
                     detector.trigger_alarm()
                     alarm_start_time = current_time
                     
-                    # 낙상 감지 정보 전송
+                    # Send fall detection information
                     if wifi_connected:
                         fall_event = {
                             'event': 'fall_detected',
@@ -454,10 +454,10 @@ def main():
                 time.sleep(sleep_time)
             
     except KeyboardInterrupt:
-        print("\n프로그램 종료")
+        print("\nProgram ended")
         close_wifi()
     except Exception as e:
-        print(f"오류 발생: {str(e)}")
+        print(f"Error occurred: {str(e)}")
         import traceback
         traceback.print_exc()
         close_wifi()
