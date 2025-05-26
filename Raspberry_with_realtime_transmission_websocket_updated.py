@@ -616,6 +616,10 @@ def main():
                     detector.trigger_alarm()
                     alarm_start_time = current_time
                     
+                    # 🔧 추가: WebSocket 연결 상태 먼저 확인
+                    print(f"📡 WebSocket 연결 상태: {websocket_connected}")
+                    print(f"📡 현재 전송 큐 길이: {len(send_data_queue)}")
+                    
                     # 낙상 감지 데이터 패키징
                     fall_package = create_fall_data_package(
                         USER_ID, 
@@ -631,26 +635,48 @@ def main():
                     print(f"🔍 - 타임스탬프: {fall_package['data'].get('timestamp')}")
                     print(f"🔍 - 전체 데이터 크기: {len(str(fall_package))} bytes")
                     
+                    # 🔧 추가: 패키지 내용 전체 출력
+                    print(f"🔍 - 완전한 패키지 내용:")
+                    print(json.dumps(fall_package, ensure_ascii=False, indent=2))
+                    
                     # 낙상 데이터 전송 (연결 상태와 관계없이 큐에 추가)
+                    print(f"📤 큐에 낙상 데이터 추가 시작...")
                     add_data_to_queue(fall_package)
                     print(f"🚨 Fall detection data added to queue (confidence: {result['fall_probability']:.2%})")
+                    
+                    # 🔧 추가: 큐 추가 후 상태 확인
+                    with data_queue_lock:
+                        queue_length_after = len(send_data_queue)
+                        fall_data_count = sum(1 for item in send_data_queue if item.get('type') == 'fall_detection')
+                    print(f"📤 큐 추가 후 길이: {queue_length_after}")
+                    print(f"📤 큐 내 낙상 데이터 개수: {fall_data_count}")
                     
                     # 연결 상태 확인 및 즉시 전송 시도
                     if websocket_connected:
                         print("✅ WebSocket connected - transmission scheduled")
                         print(f"📊 현재 큐 상태:")
-                        with data_queue_lock:
-                            queue_length = len(send_data_queue)
-                            fall_data_count = sum(1 for item in send_data_queue if item.get('type') == 'fall_detection')
-                        print(f"📊 - 전체 큐 길이: {queue_length}")
+                        print(f"📊 - 전체 큐 길이: {queue_length_after}")
                         print(f"📊 - 낙상 데이터 개수: {fall_data_count}")
+                        
+                        # 🔧 추가: 강제로 즉시 전송 시도
+                        print("🔥 강제 즉시 전송 대기 (3초)...")
+                        time.sleep(3.0)  # 전송 충분히 대기
+                        
+                        with data_queue_lock:
+                            remaining_queue = len(send_data_queue)
+                            remaining_falls = sum(1 for item in send_data_queue if item.get('type') == 'fall_detection')
+                        print(f"📊 3초 후 큐 상태:")
+                        print(f"📊 - 남은 큐 길이: {remaining_queue}")
+                        print(f"📊 - 남은 낙상 데이터: {remaining_falls}")
+                        
+                        if remaining_falls == 0:
+                            print("🎉 낙상 데이터 전송 성공!")
+                        else:
+                            print("❌ 낙상 데이터가 아직 큐에 남아있음!")
                     else:
                         print("⚠️ WebSocket disconnected - will transmit when reconnected")
                         print("🔄 재연결 시도 중...")
                     
-                    # 낙상 감지 시 추가 대기 (전송 보장)
-                    print("⏳ 낙상 데이터 전송 대기 중...")
-                    time.sleep(0.5)  # 0.2초에서 0.5초로 증가
                     print("✅ 낙상 데이터 처리 완료")
             
             # 3초 후 자동으로 알람 끄기
