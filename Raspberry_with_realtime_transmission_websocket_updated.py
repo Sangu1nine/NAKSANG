@@ -297,6 +297,7 @@ class MPU6050Sensor:
     
     def get_data(self):
         """Read IMU sensor data - all axes of accelerometer and gyroscope (converted to physical units)"""
+        
         # Raw accelerometer data
         accel_x = self.read_word_2c(register_accel_xout_h)
         accel_y = self.read_word_2c(register_accel_yout_h)
