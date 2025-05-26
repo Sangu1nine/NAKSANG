@@ -1,7 +1,8 @@
 """
 =============================================================================
-파일명: Raspberry_with_realtime_transmission_websocket.py
+파일명: Raspberry_with_realtime_transmission_websocket_updated.py
 설명: MPU6050 센서를 이용한 실시간 낙상 감지 및 WebSocket 데이터 전송 시스템
+     (TIMESTAMPTZ 및 Asia/Seoul 시간대 지원)
 
 이 시스템은 라즈베리파이에서 MPU6050 센서의 가속도계와 자이로스코프 데이터를
 실시간으로 수집하여 낙상을 감지하고, 감지된 데이터를 WebSocket을 통해 서버로 전송합니다.
@@ -12,9 +13,10 @@
 - TensorFlow Lite 모델을 사용한 낙상 감지
 - WebSocket을 통한 실시간 센서 데이터 전송
 - 낙상 감지 시 알람 및 이벤트 전송
+- TIMESTAMPTZ (Asia/Seoul) 시간대 지원
 
 개발자: NAKSANG 프로젝트팀
-버전: 2.0 (WebSocket 지원)
+버전: 2.1 (TIMESTAMPTZ + Asia/Seoul 지원)
 =============================================================================
 """
 
@@ -30,6 +32,8 @@ import json
 import threading
 import asyncio
 import websockets
+from datetime import datetime, timezone, timedelta
+import uuid
 
 try:
     from smbus2 import SMBus
@@ -69,11 +73,23 @@ USER_ID = "raspberry_pi_01"  # 라즈베리파이 고유 사용자 ID (변경 �
 # Scalers directory
 SCALERS_DIR = 'scalers'
 
+# 시간대 설정 (Asia/Seoul)
+KST = timezone(timedelta(hours=9))  # Korea Standard Time
+
 # 데이터 전송 관련 변수
 websocket_client = None
 websocket_connected = False
 send_data_queue = []
 data_queue_lock = threading.Lock()
+
+def get_current_timestamp():
+    """현재 시간을 Asia/Seoul 시간대의 ISO 8601 형식으로 반환"""
+    return datetime.now(KST).isoformat()
+
+def unix_to_kst_iso(unix_timestamp):
+    """Unix timestamp를 Asia/Seoul 시간대의 ISO 8601 형식으로 변환"""
+    dt = datetime.fromtimestamp(unix_timestamp, tz=KST)
+    return dt.isoformat()
 
 # WebSocket 연결 URL 생성
 def get_websocket_url():
@@ -99,11 +115,11 @@ async def websocket_handler():
                 with data_queue_lock:
                     if len(send_data_queue) > 0:
                         # 큐에서 데이터 가져오기
-                        sensor_data = send_data_queue.pop(0)
+                        data_package = send_data_queue.pop(0)
                         
                         try:
                             # JSON 형식으로 변환하여 전송
-                            data_json = json.dumps(sensor_data)
+                            data_json = json.dumps(data_package, ensure_ascii=False)
                             await websocket.send(data_json)
                         except Exception as e:
                             print(f"데이터 전송 오류: {str(e)}")
@@ -138,16 +154,59 @@ def start_websocket_client():
             pass
 
 # 데이터 큐에 추가하는 함수
-def add_data_to_queue(data):
+def add_data_to_queue(data_package):
     """데이터를 전송 큐에 안전하게 추가"""
     global send_data_queue
     
     with data_queue_lock:
-        send_data_queue.append(data)
+        send_data_queue.append(data_package)
         
         # 큐 크기 제한 (메모리 보호)
         if len(send_data_queue) > 1000:
             send_data_queue.pop(0)  # 오래된 데이터 제거
+
+# IMU 센서 데이터 패키징 함수
+def create_imu_data_package(sensor_data, user_id):
+    """IMU 센서 데이터를 데이터베이스 스키마에 맞게 패키징"""
+    return {
+        'type': 'imu_data',
+        'data': {
+            'user_id': user_id,
+            'timestamp': get_current_timestamp(),
+            'acc_x': float(sensor_data[0]),
+            'acc_y': float(sensor_data[1]),
+            'acc_z': float(sensor_data[2]),
+            'gyr_x': float(sensor_data[3]),
+            'gyr_y': float(sensor_data[4]),
+            'gyr_z': float(sensor_data[5])
+        }
+    }
+
+# 낙상 감지 데이터 패키징 함수
+def create_fall_data_package(user_id, fall_probability, sensor_data_snapshot):
+    """낙상 감지 데이터를 데이터베이스 스키마에 맞게 패키징"""
+    return {
+        'type': 'fall_detection',
+        'data': {
+            'user_id': user_id,
+            'timestamp': get_current_timestamp(),
+            'fall_detected': True,
+            'confidence_score': float(fall_probability),
+            'sensor_data': {
+                'acceleration': {
+                    'x': float(sensor_data_snapshot[0]),
+                    'y': float(sensor_data_snapshot[1]),
+                    'z': float(sensor_data_snapshot[2])
+                },
+                'gyroscope': {
+                    'x': float(sensor_data_snapshot[3]),
+                    'y': float(sensor_data_snapshot[4]),
+                    'z': float(sensor_data_snapshot[5])
+                },
+                'timestamp': get_current_timestamp()
+            }
+        }
+    }
 
 # WebSocket 연결 종료 함수
 def close_websocket():
@@ -176,7 +235,7 @@ def load_scalers():
     
     return scalers
 
-# MPU6050 sensor class (기존과 동일)
+# MPU6050 sensor class
 class MPU6050Sensor:
     def __init__(self, scalers=None):
         """Initialize IMU sensor (MPU6050) and I2C settings"""
@@ -272,7 +331,7 @@ class MPU6050Sensor:
         # Return converted data
         return converted_data
 
-# Fall detector class (기존과 동일)
+# Fall detector class
 class FallDetector:
     def __init__(self, model_path, seq_length=50, stride=10, n_features=6):
         """Initialize fall detection model"""
@@ -367,7 +426,8 @@ class FallDetector:
 
 def main():
     """Main function"""
-    print("Fall detection system started (WebSocket version)")
+    print("Fall detection system started (TIMESTAMPTZ + Asia/Seoul version)")
+    print(f"Current time (KST): {get_current_timestamp()}")
     
     try:
         # Load scalers
@@ -417,14 +477,10 @@ def main():
             data = sensor.get_data()
             detector.add_data_point(data)
             
-            # Send data to WebSocket (if connected)
+            # Send IMU data to WebSocket (if connected)
             if websocket_connected:
-                sensor_data = {
-                    'timestamp': time.time(),
-                    'accel': {'x': float(data[0]), 'y': float(data[1]), 'z': float(data[2])},
-                    'gyro': {'x': float(data[3]), 'y': float(data[4]), 'z': float(data[5])}
-                }
-                add_data_to_queue(sensor_data)
+                imu_package = create_imu_data_package(data, USER_ID)
+                add_data_to_queue(imu_package)
             
             time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
         
@@ -438,20 +494,17 @@ def main():
             # Read sensor data
             data = sensor.get_data()
             
-            # Send data to WebSocket (if connected)
+            # Send IMU data to WebSocket (if connected)
             if websocket_connected:
-                sensor_data = {
-                    'timestamp': time.time(),
-                    'accel': {'x': float(data[0]), 'y': float(data[1]), 'z': float(data[2])},
-                    'gyro': {'x': float(data[3]), 'y': float(data[4]), 'z': float(data[5])}
-                }
-                add_data_to_queue(sensor_data)
+                imu_package = create_imu_data_package(data, USER_ID)
+                add_data_to_queue(imu_package)
             
             # Debug output (once per second)
             current_time = time.time()
             if current_time - last_time >= 1.0:
                 print(f"Acceleration (g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
                 print(f"Gyroscope (°/s): X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
+                print(f"Current KST time: {get_current_timestamp()}")
                 if websocket_connected:
                     with data_queue_lock:
                         queue_length = len(send_data_queue)
@@ -471,17 +524,18 @@ def main():
                 # If result exists and fall is predicted
                 if result and result['prediction'] == 1:
                     print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
+                    print(f"Detection time (KST): {get_current_timestamp()}")
                     detector.trigger_alarm()
                     alarm_start_time = current_time
                     
                     # Send fall detection information
                     if websocket_connected:
-                        fall_event = {
-                            'event': 'fall_detected',
-                            'timestamp': current_time,
-                            'probability': result['fall_probability']
-                        }
-                        add_data_to_queue(fall_event)
+                        fall_package = create_fall_data_package(
+                            USER_ID, 
+                            result['fall_probability'], 
+                            data
+                        )
+                        add_data_to_queue(fall_package)
             
             # Automatically turn off alarm after 3 seconds
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
