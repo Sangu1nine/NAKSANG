@@ -452,10 +452,34 @@ def main():
             n_features=N_FEATURES
         )
         
-        # Ctrl+C signal handler
+        # Ctrl+C signal handler (개선된 버전)
         def signal_handler(sig, frame):
-            print("\nProgram ended")
+            print("\n프로그램 종료 중...")
+            
+            # WebSocket 큐에 남은 데이터 전송 대기
+            if websocket_connected:
+                print("남은 데이터 전송 중...")
+                max_wait_time = 5  # 최대 5초 대기
+                wait_start = time.time()
+                
+                while time.time() - wait_start < max_wait_time:
+                    with data_queue_lock:
+                        queue_length = len(send_data_queue)
+                    
+                    if queue_length == 0:
+                        print("모든 데이터 전송 완료")
+                        break
+                    
+                    print(f"대기 중... (남은 데이터: {queue_length}개)")
+                    time.sleep(0.5)
+                
+                if queue_length > 0:
+                    print(f"경고: {queue_length}개 데이터가 전송되지 않았습니다.")
+            
+            print("WebSocket 연결 종료 중...")
             close_websocket()
+            time.sleep(1)  # 연결 종료 대기
+            print("프로그램 종료")
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -529,14 +553,21 @@ def main():
                     detector.trigger_alarm()
                     alarm_start_time = current_time
                     
-                    # Send fall detection information
+                    # Send fall detection information (우선순위 전송)
                     if websocket_connected:
                         fall_package = create_fall_data_package(
                             USER_ID, 
                             result['fall_probability'], 
                             data
                         )
-                        add_data_to_queue(fall_package)
+                        # 낙상 데이터는 큐의 맨 앞에 추가 (우선순위)
+                        with data_queue_lock:
+                            send_data_queue.insert(0, fall_package)
+                        
+                        print(f"🚨 낙상 감지 데이터 전송 큐에 추가됨 (우선순위)")
+                        
+                        # 잠시 대기하여 전송 보장
+                        time.sleep(0.1)
             
             # Automatically turn off alarm after 3 seconds
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
