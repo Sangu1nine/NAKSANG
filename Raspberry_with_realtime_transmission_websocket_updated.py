@@ -123,6 +123,13 @@ async def websocket_handler():
                             data_package = send_data_queue.pop(0)
                             
                             try:
+                                # 낙상 데이터인 경우 전송 전 상세 로깅
+                                if data_package.get('type') == 'fall_detection':
+                                    print(f"🚨 낙상 데이터 전송 시작:")
+                                    print(f"🚨 - 사용자 ID: {data_package['data'].get('user_id')}")
+                                    print(f"🚨 - 신뢰도: {data_package['data'].get('confidence_score', 0):.2%}")
+                                    print(f"🚨 - 데이터 크기: {len(str(data_package))} bytes")
+                                
                                 # JSON 형식으로 변환하여 전송
                                 data_json = json.dumps(data_package, ensure_ascii=False)
                                 await websocket.send(data_json)
@@ -130,9 +137,17 @@ async def websocket_handler():
                                 # 낙상 데이터인 경우 특별 로깅
                                 if data_package.get('type') == 'fall_detection':
                                     print(f"🚨 Fall data transmission successful! Confidence: {data_package['data'].get('confidence_score', 0):.2%}")
+                                    print(f"🚨 전송 완료 시간: {get_current_timestamp()}")
                                     
                             except Exception as e:
                                 print(f"❌ Data transmission error: {str(e)}")
+                                print(f"❌ 에러 타입: {type(e).__name__}")
+                                
+                                # 낙상 데이터 전송 실패 시 특별 처리
+                                if data_package.get('type') == 'fall_detection':
+                                    print(f"🚨 낙상 데이터 전송 실패! 재시도 큐에 추가")
+                                    print(f"🚨 실패한 데이터: {data_package['data'].get('user_id')} - {data_package['data'].get('confidence_score', 0):.2%}")
+                                
                                 # 전송 실패한 데이터를 다시 큐에 추가 (우선순위)
                                 with data_queue_lock:
                                     send_data_queue.insert(0, data_package)
@@ -597,6 +612,14 @@ def main():
                         data
                     )
                     
+                    # 🔍 낙상 데이터 상세 로깅
+                    print(f"🔍 낙상 데이터 패키지 생성:")
+                    print(f"🔍 - 타입: {fall_package.get('type')}")
+                    print(f"🔍 - 사용자 ID: {fall_package['data'].get('user_id')}")
+                    print(f"🔍 - 신뢰도: {fall_package['data'].get('confidence_score'):.2%}")
+                    print(f"🔍 - 타임스탬프: {fall_package['data'].get('timestamp')}")
+                    print(f"🔍 - 전체 데이터 크기: {len(str(fall_package))} bytes")
+                    
                     # 낙상 데이터 전송 (연결 상태와 관계없이 큐에 추가)
                     add_data_to_queue(fall_package)
                     print(f"🚨 Fall detection data added to queue (confidence: {result['fall_probability']:.2%})")
@@ -604,11 +627,20 @@ def main():
                     # 연결 상태 확인 및 즉시 전송 시도
                     if websocket_connected:
                         print("✅ WebSocket connected - transmission scheduled")
+                        print(f"📊 현재 큐 상태:")
+                        with data_queue_lock:
+                            queue_length = len(send_data_queue)
+                            fall_data_count = sum(1 for item in send_data_queue if item.get('type') == 'fall_detection')
+                        print(f"📊 - 전체 큐 길이: {queue_length}")
+                        print(f"📊 - 낙상 데이터 개수: {fall_data_count}")
                     else:
                         print("⚠️ WebSocket disconnected - will transmit when reconnected")
+                        print("🔄 재연결 시도 중...")
                     
                     # 낙상 감지 시 추가 대기 (전송 보장)
-                    time.sleep(0.2)
+                    print("⏳ 낙상 데이터 전송 대기 중...")
+                    time.sleep(0.5)  # 0.2초에서 0.5초로 증가
+                    print("✅ 낙상 데이터 처리 완료")
             
             # 3초 후 자동으로 알람 끄기
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
