@@ -96,74 +96,111 @@ def get_websocket_url():
     """WebSocket 연결 URL 생성"""
     return f"ws://{WEBSOCKET_SERVER_IP}:{WEBSOCKET_SERVER_PORT}/ws/{USER_ID}"
 
-# WebSocket 연결 및 데이터 전송 (비동기)
+# WebSocket 연결 및 데이터 전송 (비동기) - 자동 재연결 기능 추가
 async def websocket_handler():
-    """WebSocket 연결 및 데이터 전송 처리"""
+    """WebSocket 연결 및 데이터 전송 처리 (자동 재연결 지원)"""
     global websocket_client, websocket_connected, send_data_queue
     
     ws_url = get_websocket_url()
-    print(f"WebSocket 연결 시도: {ws_url}")
+    reconnect_delay = 1  # 재연결 대기 시간 (초)
+    max_reconnect_delay = 30  # 최대 재연결 대기 시간
     
-    try:
-        async with websockets.connect(ws_url) as websocket:
-            websocket_connected = True
-            websocket_client = websocket
-            print(f"WebSocket 연결 성공: {ws_url}")
+    while True:  # 무한 재연결 루프
+        try:
+            print(f"Attempting WebSocket connection: {ws_url}")
             
-            # 데이터 전송 루프
-            while websocket_connected:
-                with data_queue_lock:
-                    if len(send_data_queue) > 0:
-                        # 큐에서 데이터 가져오기
-                        data_package = send_data_queue.pop(0)
-                        
-                        try:
-                            # JSON 형식으로 변환하여 전송
-                            data_json = json.dumps(data_package, ensure_ascii=False)
-                            await websocket.send(data_json)
-                        except Exception as e:
-                            print(f"데이터 전송 오류: {str(e)}")
-                            break
+            async with websockets.connect(ws_url) as websocket:
+                websocket_connected = True
+                websocket_client = websocket
+                reconnect_delay = 1  # 연결 성공 시 재연결 대기 시간 초기화
+                print(f"✅ WebSocket connection successful: {ws_url}")
                 
-                await asyncio.sleep(0.001)  # 짧은 대기
-                
-    except websockets.exceptions.ConnectionClosed:
-        print("WebSocket 연결이 종료되었습니다.")
-    except Exception as e:
-        print(f"WebSocket 연결 실패: {str(e)}")
-    finally:
-        websocket_connected = False
-        websocket_client = None
+                # 데이터 전송 루프
+                while websocket_connected:
+                    with data_queue_lock:
+                        if len(send_data_queue) > 0:
+                            # 큐에서 데이터 가져오기
+                            data_package = send_data_queue.pop(0)
+                            
+                            try:
+                                # JSON 형식으로 변환하여 전송
+                                data_json = json.dumps(data_package, ensure_ascii=False)
+                                await websocket.send(data_json)
+                                
+                                # 낙상 데이터인 경우 특별 로깅
+                                if data_package.get('type') == 'fall_detection':
+                                    print(f"🚨 Fall data transmission successful! Confidence: {data_package['data'].get('confidence_score', 0):.2%}")
+                                    
+                            except Exception as e:
+                                print(f"❌ Data transmission error: {str(e)}")
+                                # 전송 실패한 데이터를 다시 큐에 추가 (우선순위)
+                                with data_queue_lock:
+                                    send_data_queue.insert(0, data_package)
+                                break
+                    
+                    await asyncio.sleep(0.001)  # 짧은 대기
+                    
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"⚠️ WebSocket connection closed: {e}")
+        except websockets.exceptions.InvalidURI as e:
+            print(f"❌ Invalid WebSocket URI: {e}")
+            break  # URI 오류는 재연결해도 해결되지 않음
+        except Exception as e:
+            print(f"❌ WebSocket connection failed: {str(e)}")
+        finally:
+            websocket_connected = False
+            websocket_client = None
+        
+        # 재연결 대기
+        print(f"🔄 Reconnection attempt in {reconnect_delay} seconds...")
+        await asyncio.sleep(reconnect_delay)
+        
+        # 지수 백오프: 재연결 대기 시간을 점진적으로 증가
+        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
-# WebSocket 클라이언트 시작 (별도 스레드에서 실행)
+# WebSocket 클라이언트 시작 (별도 스레드에서 실행) - 개선된 버전
 def start_websocket_client():
-    """WebSocket 클라이언트를 새 이벤트 루프에서 시작"""
+    """WebSocket 클라이언트를 새 이벤트 루프에서 시작 (자동 재연결 지원)"""
     try:
         # 새 이벤트 루프 생성
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # WebSocket 연결 시도
+        print("🌐 WebSocket client started (auto reconnection enabled)")
+        
+        # WebSocket 연결 시도 (무한 재연결)
         loop.run_until_complete(websocket_handler())
     except Exception as e:
-        print(f"WebSocket 스레드 오류: {str(e)}")
+        print(f"❌ WebSocket thread critical error: {str(e)}")
     finally:
         try:
             loop.close()
         except:
             pass
 
-# 데이터 큐에 추가하는 함수
+# 데이터 큐에 추가하는 함수 - 개선된 버전
 def add_data_to_queue(data_package):
-    """데이터를 전송 큐에 안전하게 추가"""
+    """데이터를 전송 큐에 안전하게 추가 (우선순위 지원)"""
     global send_data_queue
     
     with data_queue_lock:
-        send_data_queue.append(data_package)
+        # 낙상 데이터는 우선순위로 큐 앞쪽에 추가
+        if data_package.get('type') == 'fall_detection':
+            send_data_queue.insert(0, data_package)
+            print(f"🚨 Fall data added to priority queue (queue length: {len(send_data_queue)})")
+        else:
+            send_data_queue.append(data_package)
         
-        # 큐 크기 제한 (메모리 보호)
-        if len(send_data_queue) > 1000:
-            send_data_queue.pop(0)  # 오래된 데이터 제거
+        # 큐 크기 제한 (메모리 보호) - 낙상 데이터는 보호
+        while len(send_data_queue) > 1000:
+            # 가장 오래된 IMU 데이터부터 제거 (낙상 데이터는 보호)
+            for i in range(len(send_data_queue) - 1, -1, -1):
+                if send_data_queue[i].get('type') != 'fall_detection':
+                    send_data_queue.pop(i)
+                    break
+            else:
+                # 모든 데이터가 낙상 데이터인 경우 (매우 드문 경우)
+                break
 
 # IMU 센서 데이터 패키징 함수
 def create_imu_data_package(sensor_data, user_id):
@@ -213,7 +250,7 @@ def close_websocket():
     """WebSocket 연결 종료"""
     global websocket_connected
     websocket_connected = False
-    print("WebSocket 연결 종료")
+    print("WebSocket connection closed")
 
 # Load scaler functions
 def load_scalers():
@@ -238,31 +275,31 @@ def load_scalers():
 # MPU6050 sensor class
 class MPU6050Sensor:
     def __init__(self, scalers=None):
-        """Initialize IMU sensor (MPU6050) and I2C settings"""
+        """IMU 센서(MPU6050) 및 I2C 설정 초기화"""
         if not SENSOR_AVAILABLE:
             raise ImportError("smbus2 library is not installed.")
         
-        self.bus = SMBus(1)  # Use I2C bus 1
+        self.bus = SMBus(1)  # I2C 버스 1 사용
         self.setup_mpu6050()
         self.frame_counter = 0
         self.scalers = scalers
         print("MPU6050 sensor initialized")
     
     def setup_mpu6050(self):
-        """MPU6050 sensor initial setup"""
-        # Power management setting - disable sleep mode
+        """MPU6050 센서 초기 설정"""
+        # 전원 관리 설정 - 슬립 모드 비활성화
         self.bus.write_byte_data(DEV_ADDR, PWR_MGMT_1, 0)
-        time.sleep(0.1)  # Stabilization time
+        time.sleep(0.1)  # 안정화 시간
     
     def read_word(self, reg):
-        """Read 16-bit word (2 bytes)"""
+        """16비트 워드(2바이트) 읽기"""
         high = self.bus.read_byte_data(DEV_ADDR, reg)
         low = self.bus.read_byte_data(DEV_ADDR, reg + 1)
         value = (high << 8) + low
         return value
     
     def read_word_2c(self, reg):
-        """Convert to 2's complement value"""
+        """2의 보수 값으로 변환"""
         val = self.read_word(reg)
         if val >= 0x8000:
             return -((65535 - val) + 1)
@@ -270,22 +307,22 @@ class MPU6050Sensor:
             return val
     
     def normalize_data(self, data, feature_names):
-        """Standard scale and normalize the sensor data"""
+        """센서 데이터 표준화 및 정규화"""
         if self.scalers is None:
-            return data  # Return original data if no scalers are provided
+            return data  # 스케일러가 없으면 원본 데이터 반환
         
         normalized_data = []
         for i, feature in enumerate(feature_names):
-            # Get value
+            # 값 가져오기
             value = data[i]
             
-            # Apply standard scaling (z-score normalization)
+            # 표준 스케일링 적용 (z-score 정규화)
             # z = (x - mean) / std
             if f"{feature}_standard" in self.scalers:
                 scaler = self.scalers[f"{feature}_standard"]
                 value = (value - scaler.mean_[0]) / scaler.scale_[0]
             
-            # Apply min-max scaling to [0, 1] range
+            # 최소-최대 스케일링을 [0, 1] 범위로 적용
             # x_norm = (x - min) / (max - min)
             if f"{feature}_minmax" in self.scalers:
                 scaler = self.scalers[f"{feature}_minmax"]
@@ -296,54 +333,54 @@ class MPU6050Sensor:
         return np.array(normalized_data)
     
     def get_data(self):
-        """Read IMU sensor data - all axes of accelerometer and gyroscope (converted to physical units)"""
+        """IMU 센서 데이터 읽기 - 가속도계와 자이로스코프의 모든 축 (물리 단위로 변환)"""
         
-        # Raw accelerometer data
+        # 원시 가속도계 데이터
         accel_x = self.read_word_2c(register_accel_xout_h)
         accel_y = self.read_word_2c(register_accel_yout_h)
         accel_z = self.read_word_2c(register_accel_zout_h)
         
-        # Convert accelerometer data to g units
+        # 가속도계 데이터를 g 단위로 변환
         accel_x = accel_x / sensitive_accel
         accel_y = accel_y / sensitive_accel
         accel_z = accel_z / sensitive_accel
         
-        # Raw gyroscope data
+        # 원시 자이로스코프 데이터
         gyro_x = self.read_word_2c(register_gyro_xout_h)
         gyro_y = self.read_word_2c(register_gyro_yout_h)
         gyro_z = self.read_word_2c(register_gyro_zout_h)
         
-        # Convert gyroscope data to degrees per second
+        # 자이로스코프 데이터를 도/초 단위로 변환
         gyro_x = gyro_x / sensitive_gyro
         gyro_y = gyro_y / sensitive_gyro
         gyro_z = gyro_z / sensitive_gyro
         
-        # Increment frame counter
+        # 프레임 카운터 증가
         self.frame_counter += 1
         
-        # Collect converted data
+        # 변환된 데이터 수집
         converted_data = np.array([accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
         
-        # Normalize data if scalers are provided
+        # 스케일러가 제공된 경우 데이터 정규화
         if self.scalers:
             feature_names = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
             return self.normalize_data(converted_data, feature_names)
         
-        # Return converted data
+        # 변환된 데이터 반환
         return converted_data
 
 # Fall detector class
 class FallDetector:
     def __init__(self, model_path, seq_length=50, stride=10, n_features=6):
-        """Initialize fall detection model"""
+        """낙상 감지 모델 초기화"""
         self.seq_length = seq_length
         self.stride = stride
         self.n_features = n_features
         self.data_buffer = deque(maxlen=seq_length)
         self.alarm_active = False
-        self.data_counter = 0  # Data counter
+        self.data_counter = 0  # 데이터 카운터
         
-        # Load TFLite model
+        # TFLite 모델 로드
         self.interpreter = self.load_model(model_path)
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
@@ -352,7 +389,7 @@ class FallDetector:
         print(f"Output shape: {self.output_details[0]['shape']}")
     
     def load_model(self, model_path):
-        """Load TFLite model"""
+        """TFLite 모델 로드"""
         try:
             interpreter = tf.lite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
@@ -362,45 +399,45 @@ class FallDetector:
             raise
     
     def add_data_point(self, data_array):
-        """Add new data point to the data buffer"""
+        """데이터 버퍼에 새로운 데이터 포인트 추가"""
         self.data_buffer.append(data_array)
         self.data_counter += 1
     
     def should_predict(self):
-        """Check if prediction should be performed (based on stride interval)"""
-        # Only predict when buffer is full and data counter is a multiple of stride
+        """예측을 수행해야 하는지 확인 (스트라이드 간격 기반)"""
+        # 버퍼가 가득 차고 데이터 카운터가 스트라이드의 배수일 때만 예측
         return len(self.data_buffer) == self.seq_length and self.data_counter % self.stride == 0
     
     def predict(self):
-        """Perform fall prediction"""
+        """낙상 예측 수행"""
         try:
             if len(self.data_buffer) < self.seq_length:
-                return None  # Not enough data
+                return None  # 충분한 데이터 없음
             
-            # Extract data from buffer and convert to array
+            # 버퍼에서 데이터 추출하고 배열로 변환
             data = np.array(list(self.data_buffer))
             
-            # Adjust data shape (add batch dimension)
+            # 데이터 형태 조정 (배치 차원 추가)
             input_data = np.expand_dims(data, axis=0).astype(np.float32)
             
-            # Set model input
+            # 모델 입력 설정
             self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
             
-            # Run inference
+            # 추론 실행
             self.interpreter.invoke()
             
-            # Get results
+            # 결과 가져오기
             output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
             
-            # Process output based on shape
+            # 출력 형태에 따른 처리
             if output_data.size == 1:
-                # Single value output
+                # 단일 값 출력
                 fall_prob = float(output_data.flatten()[0])
             else:
-                # Multi-dimensional output
+                # 다차원 출력
                 fall_prob = float(output_data[0][0])
             
-            # Prediction result (0: normal, 1: fall)
+            # 예측 결과 (0: 정상, 1: 낙상)
             prediction = 1 if fall_prob >= 0.5 else 0
             
             return {
@@ -412,7 +449,7 @@ class FallDetector:
             return None
     
     def trigger_alarm(self):
-        """Display NAKSANG when fall is detected"""
+        """낙상 감지 시 NAKSANG 표시"""
         if not self.alarm_active:
             self.alarm_active = True
             print("\n" + "-" * 30)
@@ -420,31 +457,31 @@ class FallDetector:
             print("-" * 30 + "\n")
     
     def stop_alarm(self):
-        """Stop alarm"""
+        """알람 중지"""
         if self.alarm_active:
             self.alarm_active = False
             print("Alarm stopped")
 
 def main():
-    """Main function"""
+    """메인 함수"""
     print("Fall detection system started (TIMESTAMPTZ + Asia/Seoul version)")
     print(f"Current time (KST): {get_current_timestamp()}")
     
     try:
-        # Load scalers
+        # 스케일러 로드
         print("Loading scalers...")
         scalers = load_scalers()
         print(f"{len(scalers)} scalers loaded")
         
-        # Initialize sensor
+        # 센서 초기화
         try:
             sensor = MPU6050Sensor(scalers=scalers)
         except Exception as e:
             print(f"Sensor initialization failed: {e}")
-            print("Program ended.")
+            print("Program terminated.")
             return
         
-        # Initialize fall detector
+        # 낙상 감지기 초기화
         detector = FallDetector(
             model_path=MODEL_PATH,
             seq_length=SEQ_LENGTH,
@@ -452,13 +489,13 @@ def main():
             n_features=N_FEATURES
         )
         
-        # Ctrl+C signal handler (개선된 버전)
+        # Ctrl+C 시그널 핸들러 (개선된 버전)
         def signal_handler(sig, frame):
-            print("\n프로그램 종료 중...")
+            print("\nTerminating program...")
             
             # WebSocket 큐에 남은 데이터 전송 대기
             if websocket_connected:
-                print("남은 데이터 전송 중...")
+                print("Transmitting remaining data...")
                 max_wait_time = 5  # 최대 5초 대기
                 wait_start = time.time()
                 
@@ -467,19 +504,19 @@ def main():
                         queue_length = len(send_data_queue)
                     
                     if queue_length == 0:
-                        print("모든 데이터 전송 완료")
+                        print("All data transmission completed")
                         break
                     
-                    print(f"대기 중... (남은 데이터: {queue_length}개)")
+                    print(f"Waiting... (remaining data: {queue_length} items)")
                     time.sleep(0.5)
                 
                 if queue_length > 0:
-                    print(f"경고: {queue_length}개 데이터가 전송되지 않았습니다.")
+                    print(f"Warning: {queue_length} data items were not transmitted.")
             
-            print("WebSocket 연결 종료 중...")
+            print("Closing WebSocket connection...")
             close_websocket()
             time.sleep(1)  # 연결 종료 대기
-            print("프로그램 종료")
+            print("Program terminated")
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -488,43 +525,43 @@ def main():
         websocket_thread = threading.Thread(target=start_websocket_client)
         websocket_thread.daemon = True
         websocket_thread.start()
-        print("Started WebSocket client thread")
+        print("WebSocket client thread started")
         
         # 연결 대기
         time.sleep(2)
         
-        # Fall detection loop
+        # 낙상 감지 루프
         print("Collecting sensor data...")
         
-        # Fill initial data buffer
+        # 초기 데이터 버퍼 채우기
         print(f"Filling initial data buffer ({SEQ_LENGTH} samples)...")
         for _ in range(SEQ_LENGTH):
             data = sensor.get_data()
             detector.add_data_point(data)
             
-            # Send IMU data to WebSocket (if connected)
+            # WebSocket으로 IMU 데이터 전송 (연결된 경우)
             if websocket_connected:
                 imu_package = create_imu_data_package(data, USER_ID)
                 add_data_to_queue(imu_package)
             
-            time.sleep(1.0 / SAMPLING_RATE)  # 100Hz sampling
+            time.sleep(1.0 / SAMPLING_RATE)  # 100Hz 샘플링
         
         print("Fall detection started")
         
-        # Main detection loop
+        # 메인 감지 루프
         last_time = time.time()
         alarm_start_time = 0
         
         while True:
-            # Read sensor data
+            # 센서 데이터 읽기
             data = sensor.get_data()
             
-            # Send IMU data to WebSocket (if connected)
+            # WebSocket으로 IMU 데이터 전송 (연결된 경우)
             if websocket_connected:
                 imu_package = create_imu_data_package(data, USER_ID)
                 add_data_to_queue(imu_package)
             
-            # Debug output (once per second)
+            # 디버그 출력 (1초마다)
             current_time = time.time()
             if current_time - last_time >= 1.0:
                 print(f"Acceleration (g): X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
@@ -533,53 +570,57 @@ def main():
                 if websocket_connected:
                     with data_queue_lock:
                         queue_length = len(send_data_queue)
-                    print(f"WebSocket transmission status: Connected (queue length: {queue_length})")
+                    print(f"WebSocket status: Connected (queue length: {queue_length})")
                 else:
-                    print("WebSocket transmission status: Not connected")
+                    print("WebSocket status: Not connected")
                 last_time = current_time
             
-            # Add to data buffer
+            # 데이터 버퍼에 추가
             detector.add_data_point(data)
             
-            # Perform prediction based on stride interval
+            # 스트라이드 간격에 따른 예측 수행
             if detector.should_predict():
-                # Fall prediction
+                # 낙상 예측
                 result = detector.predict()
                 
-                # If result exists and fall is predicted
+                # 결과가 존재하고 낙상이 예측된 경우
                 if result and result['prediction'] == 1:
-                    print(f"Fall detected! Probability: {result['fall_probability']:.2%}")
-                    print(f"Detection time (KST): {get_current_timestamp()}")
+                    print(f"🚨 FALL DETECTED! Probability: {result['fall_probability']:.2%}")
+                    print(f"🕐 Detection time (KST): {get_current_timestamp()}")
                     detector.trigger_alarm()
                     alarm_start_time = current_time
                     
-                    # Send fall detection information (우선순위 전송)
+                    # 낙상 감지 데이터 패키징
+                    fall_package = create_fall_data_package(
+                        USER_ID, 
+                        result['fall_probability'], 
+                        data
+                    )
+                    
+                    # 낙상 데이터 전송 (연결 상태와 관계없이 큐에 추가)
+                    add_data_to_queue(fall_package)
+                    print(f"🚨 Fall detection data added to queue (confidence: {result['fall_probability']:.2%})")
+                    
+                    # 연결 상태 확인 및 즉시 전송 시도
                     if websocket_connected:
-                        fall_package = create_fall_data_package(
-                            USER_ID, 
-                            result['fall_probability'], 
-                            data
-                        )
-                        # 낙상 데이터는 큐의 맨 앞에 추가 (우선순위)
-                        with data_queue_lock:
-                            send_data_queue.insert(0, fall_package)
-                        
-                        print(f"🚨 낙상 감지 데이터 전송 큐에 추가됨 (우선순위)")
-                        
-                        # 잠시 대기하여 전송 보장
-                        time.sleep(0.1)
+                        print("✅ WebSocket connected - transmission scheduled")
+                    else:
+                        print("⚠️ WebSocket disconnected - will transmit when reconnected")
+                    
+                    # 낙상 감지 시 추가 대기 (전송 보장)
+                    time.sleep(0.2)
             
-            # Automatically turn off alarm after 3 seconds
+            # 3초 후 자동으로 알람 끄기
             if detector.alarm_active and (current_time - alarm_start_time >= 3.0):
                 detector.stop_alarm()
             
-            # Maintain sampling rate
+            # 샘플링 레이트 유지
             sleep_time = 1.0 / SAMPLING_RATE - (time.time() - current_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
             
     except KeyboardInterrupt:
-        print("\nProgram ended")
+        print("\nProgram terminated")
         close_websocket()
     except Exception as e:
         print(f"Error occurred: {str(e)}")
@@ -588,4 +629,4 @@ def main():
         close_websocket()
 
 if __name__ == "__main__":
-    main() 
+    main()
