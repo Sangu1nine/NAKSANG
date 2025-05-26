@@ -40,9 +40,9 @@ SENSITIVE_GYRO = 131.0     # ±250°/s
 # 모델 설정
 MODEL_PATH = 'models/fall_detection.tflite'
 SCALERS_DIR = 'scalers'
-SEQ_LENGTH = 150
-STRIDE = 5
-SAMPLING_RATE = 100
+SEQ_LENGTH = 15  # 10Hz * 1.5초 = 15개 샘플
+STRIDE = 1       # 10Hz에서는 더 자주 예측 (매 0.1초)
+SAMPLING_RATE = 10
 
 # 통신 설정
 WEBSOCKET_SERVER_IP = '192.168.0.177'
@@ -55,7 +55,7 @@ KST = timezone(timedelta(hours=9))
 class SafeDataSender:
     """안전한 데이터 전송 관리자"""
     def __init__(self):
-        self.imu_queue = queue.Queue(maxsize=1000)
+        self.imu_queue = queue.Queue(maxsize=100)  # 10Hz용으로 크기 축소
         self.fall_queue = queue.Queue(maxsize=100)  # 낙상 데이터는 별도 큐
         self.websocket = None
         self.connected = False
@@ -93,7 +93,7 @@ class SafeDataSender:
                     imu_data = self.imu_queue.get_nowait()
                     await self._send_data(imu_data, is_fall=False)
                 
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0.01)  # 10Hz에 맞춰 전송 간격 조정
                 
             except Exception as e:
                 print(f"전송 루프 오류: {e}")
@@ -356,12 +356,13 @@ def main():
             # IMU 데이터 전송
             data_sender.add_imu_data(create_imu_package(data, USER_ID))
             
-            # 디버그 출력 (1초마다)
+            # 디버그 출력 (5초마다 - 10Hz에서는 덜 자주)
             current_time = time.time()
-            if current_time - last_print >= 1.0:
+            if current_time - last_print >= 5.0:
                 print(f"가속도: X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
                 print(f"자이로: X={data[3]:.2f}, Y={data[4]:.2f}, Z={data[5]:.2f}")
                 print(f"연결상태: {'✅' if data_sender.connected else '❌'}")
+                print(f"샘플링: {SAMPLING_RATE}Hz, 버퍼크기: {len(detector.buffer)}/{SEQ_LENGTH}")
                 last_print = current_time
             
             # 낙상 예측
@@ -375,7 +376,7 @@ def main():
                     data_sender.add_fall_data(fall_package)
                     
                     print("🚨 NAKSANG!")
-                    time.sleep(3)  # 3초 알람
+                    time.sleep(2)  # 10Hz에서는 2초 알람으로 단축
             
             # 샘플링 레이트 유지
             time.sleep(1.0 / SAMPLING_RATE)
