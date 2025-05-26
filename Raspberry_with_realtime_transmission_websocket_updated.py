@@ -119,8 +119,18 @@ async def websocket_handler():
                 while websocket_connected:
                     with data_queue_lock:
                         if len(send_data_queue) > 0:
-                            # 큐에서 데이터 가져오기
-                            data_package = send_data_queue.pop(0)
+                            # 🔧 핵심 수정: 낙상 데이터 우선 처리
+                            fall_data_index = None
+                            for i, item in enumerate(send_data_queue):
+                                if item.get('type') == 'fall_detection':
+                                    fall_data_index = i
+                                    break
+                            
+                            if fall_data_index is not None:
+                                data_package = send_data_queue.pop(fall_data_index)
+                                print(f"🚨 낙상 데이터 우선 전송 시작!")
+                            else:
+                                data_package = send_data_queue.pop(0)
                             
                             try:
                                 # 낙상 데이터인 경우 전송 전 상세 로깅
@@ -195,16 +205,17 @@ def start_websocket_client():
 
 # 데이터 큐에 추가하는 함수 - 개선된 버전
 def add_data_to_queue(data_package):
-    """데이터를 전송 큐에 안전하게 추가 (우선순위 지원)"""
+    """데이터를 전송 큐에 안전하게 추가 (낙상 데이터는 연결 상태 무관)"""
     global send_data_queue
     
     with data_queue_lock:
-        # 낙상 데이터는 우선순위로 큐 앞쪽에 추가
+        # 🔧 핵심 수정: 낙상 데이터는 연결 상태와 관계없이 항상 큐에 추가
         if data_package.get('type') == 'fall_detection':
             send_data_queue.insert(0, data_package)
-            print(f"🚨 Fall data added to priority queue (queue length: {len(send_data_queue)})")
-        else:
+            print(f"🚨 낙상 데이터 큐 추가 완료! (연결상태무관) 대기열: {len(send_data_queue)}개")
+        elif websocket_connected:  # IMU 데이터는 연결된 경우에만
             send_data_queue.append(data_package)
+        # else: 연결이 끊어진 경우 IMU 데이터는 추가하지 않음
         
         # 큐 크기 제한 (메모리 보호) - 낙상 데이터는 보호
         while len(send_data_queue) > 1000:
