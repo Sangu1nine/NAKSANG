@@ -40,8 +40,8 @@ SENSITIVE_GYRO = 131.0     # ±250°/s
 # 모델 설정
 MODEL_PATH = 'models/fall_detection.tflite'
 SCALERS_DIR = 'scalers'
-SEQ_LENGTH = 15  # 10Hz * 1.5초 = 15개 샘플
-STRIDE = 1       # 10Hz에서는 더 자주 예측 (매 0.1초)
+SEQ_LENGTH = 150  # 모델 입력 shape와 일치시킴 (1.5초)
+STRIDE = 5        # 0.05초마다 예측
 SAMPLING_RATE = 100  # 센서 감지/낙상 감지 100Hz 유지
 SEND_RATE = 10       # WebSocket 송신 10Hz
 
