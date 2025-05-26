@@ -42,7 +42,8 @@ MODEL_PATH = 'models/fall_detection.tflite'
 SCALERS_DIR = 'scalers'
 SEQ_LENGTH = 15  # 10Hz * 1.5초 = 15개 샘플
 STRIDE = 1       # 10Hz에서는 더 자주 예측 (매 0.1초)
-SAMPLING_RATE = 10
+SAMPLING_RATE = 100  # 센서 감지/낙상 감지 100Hz 유지
+SEND_RATE = 10       # WebSocket 송신 10Hz
 
 # 통신 설정
 WEBSOCKET_SERVER_IP = '192.168.0.177'
@@ -298,6 +299,9 @@ async def websocket_handler(data_sender):
         await asyncio.sleep(retry_delay)
         retry_delay = min(retry_delay * 2, 30)
 
+# IMU 송신 버퍼 (100Hz로 쌓고 10Hz로 송신)
+imu_send_buffer = deque(maxlen=SAMPLING_RATE)  # 1초치 버퍼
+
 def main():
     """메인 함수"""
     print("🚀 낙상 감지 시스템 시작")
@@ -315,10 +319,9 @@ def main():
     # 종료 처리
     def signal_handler(sig, frame):
         print("\n프로그램 종료 중...")
-        # 남은 낙상 데이터 처리 대기
         if not data_sender.fall_queue.empty():
             print(f"남은 낙상 데이터: {data_sender.fall_queue.qsize()}개")
-            time.sleep(3)  # 전송 대기
+            time.sleep(3)
         print("프로그램 종료")
         sys.exit(0)
     
@@ -339,24 +342,32 @@ def main():
     for _ in range(SEQ_LENGTH):
         data = sensor.get_data()
         detector.add_data(data)
-        data_sender.add_imu_data(create_imu_package(data, USER_ID))
+        imu_send_buffer.append(data)  # 버퍼에만 추가
         time.sleep(1.0 / SAMPLING_RATE)
     
     print("🎯 낙상 감지 시작")
     
-    # 메인 루프
+    # --- IMU 송신 루프 (10Hz) ---
+    def imu_send_loop():
+        while True:
+            if imu_send_buffer:
+                latest_data = imu_send_buffer[-1]
+                data_sender.add_imu_data(create_imu_package(latest_data, USER_ID))
+            time.sleep(1.0 / SEND_RATE)
+    
+    imu_sender_thread = threading.Thread(target=imu_send_loop, daemon=True)
+    imu_sender_thread.start()
+    
+    # --- 메인 루프 (100Hz) ---
     last_print = time.time()
     
     while True:
         try:
-            # 센서 데이터 읽기
             data = sensor.get_data()
             detector.add_data(data)
+            imu_send_buffer.append(data)  # 100Hz로 버퍼에만 추가
             
-            # IMU 데이터 전송
-            data_sender.add_imu_data(create_imu_package(data, USER_ID))
-            
-            # 디버그 출력 (5초마다 - 10Hz에서는 덜 자주)
+            # 디버그 출력 (5초마다)
             current_time = time.time()
             if current_time - last_print >= 5.0:
                 print(f"가속도: X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
@@ -370,17 +381,12 @@ def main():
                 result = detector.predict()
                 if result and result['prediction'] == 1:
                     print(f"\n🚨 낙상 감지! 신뢰도: {result['probability']:.2%}")
-                    
-                    # 낙상 데이터 생성 및 전송
                     fall_package = create_fall_package(USER_ID, result['probability'], data)
                     data_sender.add_fall_data(fall_package)
-                    
                     print("🚨 NAKSANG!")
-                    time.sleep(2)  # 10Hz에서는 2초 알람으로 단축
+                    time.sleep(2)
             
-            # 샘플링 레이트 유지
             time.sleep(1.0 / SAMPLING_RATE)
-            
         except Exception as e:
             print(f"메인 루프 오류: {e}")
             time.sleep(1)
