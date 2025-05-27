@@ -2,8 +2,8 @@
 Improved Raspberry Pi Fall Detection System
 - Short code, stable operation
 - State-based data transmission (idle=stop, walking=IMU, fall/emergency=event)
-- Simple walking detection added
-- Complex state logic removed
+- Improved walking detection with stability
+- Scikit-learn version warning fixed
 """
 
 import time
@@ -21,6 +21,10 @@ import websockets
 from datetime import datetime, timezone, timedelta
 import queue
 from enum import Enum
+import warnings
+
+# Suppress scikit-learn version warnings
+warnings.filterwarnings("ignore", message="Trying to unpickle estimator")
 
 try:
     from smbus2 import SMBus
@@ -60,100 +64,180 @@ class UserState(Enum):
     FALL = "Fall"
     EMERGENCY = "Emergency"
 
-class SimpleWalkingDetector:
-    """Simple walking detector"""
+class ImprovedWalkingDetector:
+    """Improved walking detector with stability"""
     def __init__(self):
-        self.buffer_size = 200  # 2 seconds
+        self.buffer_size = 300  # 3 seconds buffer for better analysis
         self.acc_buffer = deque(maxlen=self.buffer_size)
         self.is_walking = False
         self.confidence = 0.0
         self.last_walking_time = 0
         
-        # Simple thresholds
+        # Improved thresholds for stability
         self.thresholds = {
-            'acc_std_min': 0.15,     # Minimum acceleration variance
-            'step_freq_min': 1.0,    # Minimum walking frequency
-            'step_freq_max': 4.0,    # Maximum walking frequency
-            'confidence_min': 0.6    # Confidence threshold
+            'acc_std_min': 0.2,      # Increased minimum variance
+            'acc_std_max': 2.0,      # Maximum variance to filter out sudden movements
+            'step_freq_min': 1.2,    # More realistic walking frequency
+            'step_freq_max': 3.5,    # More realistic walking frequency
+            'confidence_threshold': 0.7,  # Higher confidence threshold
+            'min_duration': 2.0,     # Minimum walking duration (seconds)
+            'debounce_time': 1.5     # Debounce time to prevent rapid state changes
         }
-        print("🚶 Simple Walking Detector initialized.")
+        
+        # State tracking for stability
+        self.walking_start_time = None
+        self.last_state_change = 0
+        self.consecutive_walking_count = 0
+        self.consecutive_idle_count = 0
+        
+        print("🚶 Improved Walking Detector initialized.")
 
     def add_data(self, acc_x, acc_y, acc_z):
-        """Add accelerometer data and detect walking"""
+        """Add accelerometer data and detect walking with improved stability"""
         acc_magnitude = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
         self.acc_buffer.append(acc_magnitude)
 
         if len(self.acc_buffer) >= self.buffer_size:
-            self._analyze()
+            self._analyze_with_stability()
         
         return self.is_walking, self.confidence
 
-    def _analyze(self):
-        """Simple walking analysis"""
+    def _analyze_with_stability(self):
+        """Improved walking analysis with stability checks"""
+        current_time = time.time()
         acc_data = np.array(self.acc_buffer)
+        
+        # Calculate movement statistics
         acc_std = np.std(acc_data)
-        threshold = np.mean(acc_data) + 0.2 * np.std(acc_data)
+        acc_mean = np.mean(acc_data)
+        
+        # Dynamic threshold based on recent data
+        threshold = acc_mean + 0.15 * acc_std
+        
+        # Find peaks with improved algorithm
         peaks = []
-        for i in range(10, len(acc_data)-10):
-            if acc_data[i] > threshold and acc_data[i] == max(acc_data[i-5:i+6]):
+        min_peak_distance = 15  # Minimum distance between peaks (0.15 seconds)
+        
+        for i in range(20, len(acc_data)-20):
+            if (acc_data[i] > threshold and 
+                acc_data[i] == max(acc_data[i-10:i+11]) and
+                (not peaks or i - peaks[-1] >= min_peak_distance)):
                 peaks.append(i)
+        
+        # Calculate step frequency
         step_frequency = 0
         if len(peaks) > 1:
-            step_frequency = len(peaks) / 2.0  # 2 seconds buffer
-
-        confidence = 0.0
-        if acc_std >= self.thresholds['acc_std_min']:
-            confidence += 0.5
-        if self.thresholds['step_freq_min'] <= step_frequency <= self.thresholds['step_freq_max']:
-            confidence += 0.5
-
-        self.confidence = confidence
+            step_frequency = len(peaks) / 3.0  # 3 seconds buffer
+        
+        # Calculate confidence with multiple factors
+        confidence_factors = []
+        
+        # Factor 1: Standard deviation check
+        if (self.thresholds['acc_std_min'] <= acc_std <= self.thresholds['acc_std_max']):
+            confidence_factors.append(0.4)
+        
+        # Factor 2: Step frequency check
+        if (self.thresholds['step_freq_min'] <= step_frequency <= self.thresholds['step_freq_max']):
+            confidence_factors.append(0.4)
+        
+        # Factor 3: Regularity check (variance in peak intervals)
+        if len(peaks) >= 3:
+            intervals = np.diff(peaks)
+            if np.std(intervals) < 10:  # Regular intervals
+                confidence_factors.append(0.2)
+        
+        self.confidence = sum(confidence_factors)
+        
+        # State change logic with debouncing
+        new_walking_state = self.confidence >= self.thresholds['confidence_threshold']
+        
+        # Debouncing: prevent rapid state changes
+        if current_time - self.last_state_change < self.thresholds['debounce_time']:
+            return  # Skip state change if too recent
+        
+        # Count consecutive detections for stability
+        if new_walking_state:
+            self.consecutive_walking_count += 1
+            self.consecutive_idle_count = 0
+        else:
+            self.consecutive_idle_count += 1
+            self.consecutive_walking_count = 0
+        
+        # State transition logic
         old_walking = self.is_walking
-        self.is_walking = confidence >= self.thresholds['confidence_min']
-        if old_walking != self.is_walking:
-            status = "started" if self.is_walking else "stopped"
-            print(f"🚶 Walking {status} (Confidence: {confidence:.2f})")
+        
+        # Start walking: need 3 consecutive positive detections
+        if not self.is_walking and self.consecutive_walking_count >= 3:
+            self.is_walking = True
+            self.walking_start_time = current_time
+            self.last_state_change = current_time
+            print(f"🚶 Walking started (Confidence: {self.confidence:.2f}, Frequency: {step_frequency:.2f}Hz)")
+        
+        # Stop walking: need 5 consecutive negative detections AND minimum duration
+        elif (self.is_walking and self.consecutive_idle_count >= 5 and
+              self.walking_start_time and 
+              current_time - self.walking_start_time >= self.thresholds['min_duration']):
+            self.is_walking = False
+            self.last_state_change = current_time
+            duration = current_time - self.walking_start_time if self.walking_start_time else 0
+            print(f"🚶 Walking stopped (Duration: {duration:.1f}s, Final confidence: {self.confidence:.2f})")
 
-class SimpleStateManager:
-    """Simple state manager"""
+class ImprovedStateManager:
+    """Improved state manager with better transition logic"""
     def __init__(self):
         self.current_state = UserState.DAILY
         self.state_start_time = time.time()
         self.last_fall_time = None
-        self.fall_cooldown = 10.0  # 10 seconds cooldown after fall
-        print(f"🔄 State Manager initialized: {self.current_state.value}")
+        self.fall_cooldown = 10.0
+        
+        # Improved transition parameters
+        self.walking_confirm_time = 3.0    # Need 3 seconds of walking to confirm
+        self.idle_confirm_time = 8.0       # Need 8 seconds of no walking to return to idle
+        self.pending_walking_start = None
+        
+        print(f"🔄 Improved State Manager initialized: {self.current_state.value}")
 
     def update_state(self, is_walking, fall_detected):
-        """Update state (simple logic)"""
+        """Update state with improved transition logic"""
         current_time = time.time()
         previous_state = self.current_state
 
-        # Fall detection (with cooldown)
+        # Fall detection (highest priority, with cooldown)
         if fall_detected and self._can_detect_fall():
             self.current_state = UserState.FALL
             self.last_fall_time = current_time
             self.state_start_time = current_time
+            self.pending_walking_start = None
             print(f"🚨 Fall detected: {previous_state.value} → {self.current_state.value}")
             return True
 
-        # Idle ↔ Walking transition
+        # Idle → Walking transition (with confirmation period)
         elif self.current_state == UserState.DAILY and is_walking:
-            self.current_state = UserState.WALKING
-            self.state_start_time = current_time
-            print(f"🚶 Walking started: {previous_state.value} → {self.current_state.value}")
-            return True
+            if self.pending_walking_start is None:
+                self.pending_walking_start = current_time
+            elif current_time - self.pending_walking_start >= self.walking_confirm_time:
+                self.current_state = UserState.WALKING
+                self.state_start_time = current_time
+                self.pending_walking_start = None
+                print(f"🚶 Walking confirmed: {previous_state.value} → {self.current_state.value}")
+                return True
 
+        # Cancel pending walking if not walking anymore
+        elif self.current_state == UserState.DAILY and not is_walking:
+            if self.pending_walking_start:
+                self.pending_walking_start = None
+
+        # Walking → Idle transition (with extended idle period)
         elif self.current_state == UserState.WALKING and not is_walking:
-            # Return to idle after 5 seconds of inactivity
-            if current_time - self.state_start_time > 5.0:
+            if current_time - self.state_start_time > self.idle_confirm_time:
                 self.current_state = UserState.DAILY
                 self.state_start_time = current_time
                 print(f"🏠 Returned to Idle: {previous_state.value} → {self.current_state.value}")
                 return True
 
-        # Auto-recovery after fall (emergency handled at server)
+        # Auto-recovery after fall
         elif self.current_state == UserState.FALL:
-            if current_time - self.state_start_time > 3.0:
+            if current_time - self.state_start_time > 5.0:  # Longer fall recovery time
                 self.current_state = UserState.DAILY
                 self.state_start_time = current_time
                 print(f"✅ Returned from Fall: {previous_state.value} → {self.current_state.value}")
@@ -172,12 +256,17 @@ class SimpleStateManager:
         return self.current_state != UserState.DAILY
 
     def get_state_info(self):
-        """Return state info"""
-        return {
+        """Return state info with pending status"""
+        info = {
             'state': self.current_state.value,
             'duration': time.time() - self.state_start_time,
             'can_detect_fall': self._can_detect_fall()
         }
+        
+        if self.pending_walking_start:
+            info['pending_walking'] = time.time() - self.pending_walking_start
+            
+        return info
 
 class SafeDataSender:
     """Safe data sending manager"""
@@ -247,7 +336,7 @@ class SafeDataSender:
                 self.fall_queue.put_nowait(data)
 
 class SimpleSensor:
-    """Sensor class"""
+    """Sensor class with improved scaler handling"""
     def __init__(self):
         if not SENSOR_AVAILABLE:
             raise ImportError("Sensor library is missing.")
@@ -259,7 +348,7 @@ class SimpleSensor:
         print("Sensor initialized.")
 
     def _load_scalers(self):
-        """Load scalers"""
+        """Load scalers with version compatibility"""
         scalers = {}
         features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
         
@@ -268,10 +357,13 @@ class SimpleSensor:
                 std_path = os.path.join(SCALERS_DIR, f"{feature}_standard_scaler.pkl")
                 minmax_path = os.path.join(SCALERS_DIR, f"{feature}_minmax_scaler.pkl")
                 
-                with open(std_path, 'rb') as f:
-                    scalers[f"{feature}_standard"] = pickle.load(f)
-                with open(minmax_path, 'rb') as f:
-                    scalers[f"{feature}_minmax"] = pickle.load(f)
+                # Suppress warnings during loading
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with open(std_path, 'rb') as f:
+                        scalers[f"{feature}_standard"] = pickle.load(f)
+                    with open(minmax_path, 'rb') as f:
+                        scalers[f"{feature}_minmax"] = pickle.load(f)
             except Exception as e:
                 print(f"Failed to load scaler {feature}: {e}")
         
@@ -417,15 +509,15 @@ async def websocket_handler(data_sender):
 
 def main():
     """Main function"""
-    print("🚀 Improved Fall Detection System Started.")
+    print("🚀 Improved Fall Detection System Started (v2.0)")
     print(f"Current time (KST): {datetime.now(KST).isoformat()}")
     
     # Initialization
     try:
         sensor = SimpleSensor()
         fall_detector = SimpleFallDetector()
-        walking_detector = SimpleWalkingDetector()
-        state_manager = SimpleStateManager()
+        walking_detector = ImprovedWalkingDetector()
+        state_manager = ImprovedStateManager()
         data_sender = SafeDataSender()
     except Exception as e:
         print(f"Initialization failed: {e}")
@@ -507,12 +599,15 @@ def main():
             
             # 5. Debug print every 5 seconds
             if current_time - last_print >= 5.0:
-                print(f"\n📊 System Status:")
-                print(f"   Current state: {current_state.value} ({state_info['duration']:.1f}s)")
-                print(f"   Walking detected: {'🚶' if is_walking else '🚫'} (Confidence: {walk_confidence:.2f})")
-                print(f"   Data transmission: {'✅' if state_manager.should_send_data() else '❌ (Idle state)'}")
-                print(f"   Connection status: {'✅' if data_sender.connected else '❌'}")
-                print(f"   Accel: X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}")
+                status_msg = f"\n📊 System Status:"
+                status_msg += f"\n   Current state: {current_state.value} ({state_info['duration']:.1f}s)"
+                if 'pending_walking' in state_info:
+                    status_msg += f"\n   Pending walking: {state_info['pending_walking']:.1f}s"
+                status_msg += f"\n   Walking detected: {'🚶' if is_walking else '🚫'} (Confidence: {walk_confidence:.2f})"
+                status_msg += f"\n   Data transmission: {'✅' if state_manager.should_send_data() else '❌ (Idle state)'}"
+                status_msg += f"\n   Connection status: {'✅' if data_sender.connected else '❌'}"
+                status_msg += f"\n   Accel: X={data[0]:.2f}, Y={data[1]:.2f}, Z={data[2]:.2f}"
+                print(status_msg)
                 last_print = current_time
             
             time.sleep(1.0 / SAMPLING_RATE)
