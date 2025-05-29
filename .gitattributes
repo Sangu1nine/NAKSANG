@@ -1,0 +1,17 @@
+# 파이썬, 쉘, 텍스트 파일은 항상 LF로 관리
+*.py text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+
+# 추가 설정 파일들도 LF로
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.cfg text eol=lf
+*.conf text eol=lf
+*.ini text eol=lf
+
+# Windows 실행 파일은 바이너리로
+*.exe binary
+*.dll binary
