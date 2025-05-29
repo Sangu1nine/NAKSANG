@@ -92,10 +92,10 @@ class OptimizedROCWalkingDetector:
             'regularity': 0.15          # 규칙성
         }
         
-        # 메모리 최적화: 1.5초 버퍼 (150샘플 @ 100Hz)
+        # 🔧 MODIFIED: 메모리 최적화 - time_buffer 제거
         self.buffer_size = 150
         self.acc_buffer = deque(maxlen=self.buffer_size)
-        self.time_buffer = deque(maxlen=self.buffer_size)
+        # 🗑️ REMOVED: time_buffer는 실제로 사용되지 않으므로 제거
         
         # 상태 변수
         self.is_walking = False
@@ -115,10 +115,8 @@ class OptimizedROCWalkingDetector:
     def add_data(self, acc_x, acc_y, acc_z):
         """센서 데이터 추가 및 실시간 보행 감지"""
         acc_magnitude = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
-        current_time = time.time()
         
         self.acc_buffer.append(acc_magnitude)
-        self.time_buffer.append(current_time)
         
         # 충분한 데이터가 있으면 ROC 기반 분석
         if len(self.acc_buffer) >= self.buffer_size:
@@ -132,7 +130,16 @@ class OptimizedROCWalkingDetector:
         
         # 데이터 변환 (한 번만)
         acc_data = np.array(self.acc_buffer)
-        time_data = np.array(self.time_buffer)
+        
+        # 🆕 데이터 품질 검증 추가
+        acc_range = np.max(acc_data) - np.min(acc_data)
+        if acc_range < 0.01:  # 가속도 변화가 거의 없으면 경고
+            if hasattr(self, 'low_variance_warning_time'):
+                if current_time - self.low_variance_warning_time > 30:  # 30초마다 한 번
+                    print(f"⚠️ 가속도 변화량이 매우 작습니다 (range: {acc_range:.6f}g)")
+                    self.low_variance_warning_time = current_time
+            else:
+                self.low_variance_warning_time = current_time
         
         # 1. 이동평균 필터링 (5포인트)
         acc_smooth = np.convolve(acc_data, np.ones(5)/5, mode='same')
@@ -146,7 +153,7 @@ class OptimizedROCWalkingDetector:
         peaks = self._fast_peak_detection(acc_smooth, threshold)
         
         # 4. 보행 주기 및 규칙성 계산
-        step_frequency, regularity = self._calculate_gait_features(time_data, peaks)
+        step_frequency, regularity = self._calculate_gait_features(peaks)
         
         # 5. ROC 기반 신뢰도 계산
         confidence_score = self._calculate_roc_confidence(
@@ -160,10 +167,12 @@ class OptimizedROCWalkingDetector:
         self.last_analysis = {
             'acc_mean': acc_mean,
             'acc_std': acc_std,
+            'acc_range': acc_range,  # 🆕 가속도 범위 추가
             'step_frequency': step_frequency,
             'regularity': regularity,
             'peaks_count': len(peaks),
-            'confidence': confidence_score
+            'confidence': confidence_score,
+            'threshold_used': threshold  # 🆕 사용된 임계값 추가
         }
 
     def _fast_peak_detection(self, acc_smooth, threshold):
@@ -178,22 +187,23 @@ class OptimizedROCWalkingDetector:
         
         return peaks
 
-    def _calculate_gait_features(self, time_data, peaks):
-        """보행 특징 계산 (주기 및 규칙성)"""
+    def _calculate_gait_features(self, peaks):
+        """보행 특징 계산 (주기 및 규칙성) - 🔧 MODIFIED: 시간 계산 간소화"""
         if len(peaks) < 2:
             return 0.0, 0.0
         
-        peak_times = time_data[peaks]
-        intervals = np.diff(peak_times)
+        # 🔧 MODIFIED: 샘플링 레이트 기반 시간 계산 (100Hz)
+        peak_intervals_samples = np.diff(peaks)
+        peak_intervals_seconds = peak_intervals_samples / SAMPLING_RATE
         
-        if len(intervals) == 0 or np.any(intervals <= 0):
+        if len(peak_intervals_seconds) == 0 or np.any(peak_intervals_seconds <= 0):
             return 0.0, 0.0
         
         # 보행 주파수 (Hz)
-        step_frequency = 1.0 / np.mean(intervals)
+        step_frequency = 1.0 / np.mean(peak_intervals_seconds)
         
         # 규칙성 (표준편차가 작을수록 규칙적)
-        regularity = 1.0 / (1.0 + np.std(intervals))
+        regularity = 1.0 / (1.0 + np.std(peak_intervals_seconds))
         
         return step_frequency, regularity
 
@@ -270,7 +280,7 @@ class OptimizedStateManager:
         self.current_state = UserState.DAILY
         self.state_start_time = time.time()
         self.last_fall_time = None
-        self.fall_cooldown = FALL_COOLDOWN_TIME  # 🔧 MODIFIED: 쿨다운 시간 증가
+        self.fall_cooldown = FALL_COOLDOWN_TIME
 
     def update_state(self, is_walking, fall_detected):
         current_time = time.time()
@@ -307,9 +317,6 @@ class OptimizedStateManager:
         if self.last_fall_time is None:
             return True
         return time.time() - self.last_fall_time > self.fall_cooldown
-
-    def should_send_data(self):
-        return self.current_state != UserState.DAILY
 
 class OptimizedDataSender:
     """Optimized data sender"""
@@ -379,6 +386,10 @@ class OptimizedSensor:
         self.bus.write_byte_data(DEV_ADDR, PWR_MGMT_1, 0)
         time.sleep(0.1)
         self.scalers = self._load_scalers()
+        # 🆕 센서 데이터 검증을 위한 변수들 추가
+        self.last_raw_data = None
+        self.same_data_count = 0
+        self.data_change_threshold = 0.001  # 변화 감지 임계값
 
     def _load_scalers(self):
         scalers = {}
@@ -413,6 +424,25 @@ class OptimizedSensor:
         for reg in GYRO_REGISTERS:
             raw_data.append(self._read_word_2c(reg) / SENSITIVE_GYRO)
 
+        # 🔧 MODIFIED: 센서 데이터 변화 검증 추가
+        if self.last_raw_data is not None:
+            data_changed = False
+            for i, val in enumerate(raw_data):
+                if abs(val - self.last_raw_data[i]) > self.data_change_threshold:
+                    data_changed = True
+                    break
+            
+            if not data_changed:
+                self.same_data_count += 1
+                if self.same_data_count >= 50:  # 0.5초간 동일한 데이터
+                    print(f"⚠️ 센서 데이터가 고정되어 있습니다. 센서 연결을 확인하세요.")
+                    print(f"   Raw data: [{', '.join([f'{x:.3f}' for x in raw_data])}]")
+                    self.same_data_count = 0  # 메시지 반복 방지
+            else:
+                self.same_data_count = 0
+        
+        self.last_raw_data = raw_data.copy()
+
         if self.scalers:
             features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
             normalized = []
@@ -441,6 +471,10 @@ class OptimizedFallDetector:
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
+        # 🆕 로그 스팸 방지를 위한 변수들 추가
+        self.last_probability = -1.0
+        self.same_probability_count = 0
+        self.probability_change_threshold = 0.05  # 5% 이상 변화시에만 로그 출력
 
     def add_data(self, data):
         self.buffer.append(data)
@@ -462,9 +496,28 @@ class OptimizedFallDetector:
             fall_prob = float(output.flatten()[0])
             prediction = 1 if fall_prob >= FALL_DETECTION_THRESHOLD else 0
             
-            return {'prediction': prediction, 'probability': fall_prob}
+            # 🔧 MODIFIED: 확률 변화 추적하여 로그 스팸 방지
+            result = {'prediction': prediction, 'probability': fall_prob}
             
-        except Exception:
+            # 확률 변화 확인
+            if self.last_probability != -1.0:
+                probability_change = abs(fall_prob - self.last_probability)
+                if probability_change < self.probability_change_threshold:
+                    self.same_probability_count += 1
+                    # 같은 확률이 10회 이상 연속되면 suppress_log 플래그 추가
+                    if self.same_probability_count >= 10:
+                        result['suppress_log'] = True
+                else:
+                    self.same_probability_count = 0
+                    result['suppress_log'] = False
+            else:
+                result['suppress_log'] = False
+            
+            self.last_probability = fall_prob
+            return result
+            
+        except Exception as e:
+            print(f"🚨 Fall detection prediction error: {e}")
             return None
 
 def create_imu_package(data, user_id, analysis_info=None):
@@ -518,21 +571,19 @@ def create_fall_package(user_id, probability, sensor_data, analysis_info=None):
     return package
 
 async def websocket_handler(data_sender):
-    """WebSocket connection handler - Enhanced reconnection logic"""
+    """WebSocket connection handler - 🔧 MODIFIED: 간소화된 연결 관리"""
     url = f"ws://{WEBSOCKET_SERVER_IP}:{WEBSOCKET_SERVER_PORT}/ws/{USER_ID}"
     
     while True:
         try:
             print(f"🔄 WebSocket connection attempt... (Attempt {data_sender.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
             
-            # 🔧 MODIFIED: ping 설정 개선 및 연결 안정성 향상
+            # 🔧 MODIFIED: 연결 설정 간소화
             async with websockets.connect(
                 url,
-                ping_interval=30,    # 30초마다 핑 (증가)
-                ping_timeout=15,     # 15초 타임아웃 (증가)
-                close_timeout=10,    # 10초 종료 타임아웃 (증가)
-                max_size=2**20,      # 1MB 최대 메시지 크기
-                compression=None     # 압축 비활성화로 성능 향상
+                ping_interval=20,    # 20초마다 핑
+                ping_timeout=10,     # 10초 타임아웃
+                close_timeout=5,     # 5초 종료 타임아웃
             ) as websocket:
                 data_sender.websocket = websocket
                 data_sender.connected = True
@@ -540,49 +591,9 @@ async def websocket_handler(data_sender):
                 data_sender.reconnect_attempts = 0
                 print("✅ WebSocket connected")
                 
-                # 연결 성공 메시지 전송
-                try:
-                    await websocket.send(json.dumps({
-                        "type": "connection_health_check",
-                        "user_id": USER_ID,
-                        "timestamp": datetime.now(KST).isoformat(),
-                        "status": "connected"
-                    }))
-                except Exception as e:
-                    print(f"Connection confirmation message failed: {e}")
-                
-                # 🆕 주기적 연결 상태 확인 태스크 추가
-                async def periodic_health_check():
-                    while data_sender.connected:
-                        try:
-                            await asyncio.sleep(25)  # 25초마다 체크
-                            if data_sender.websocket:
-                                await data_sender.websocket.send(json.dumps({
-                                    "type": "heartbeat",
-                                    "user_id": USER_ID,
-                                    "timestamp": datetime.now(KST).isoformat()
-                                }))
-                        except Exception as e:
-                            print(f"💓 Connection health check failed: {e}")
-                            break
-                
-                # 태스크 동시 실행
-                health_task = asyncio.create_task(periodic_health_check())
-                send_task = asyncio.create_task(data_sender.send_loop())
-                
-                # 어느 하나라도 종료되면 전체 종료
-                done, pending = await asyncio.wait(
-                    [health_task, send_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # 남은 태스크 정리
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+                # 🗑️ REMOVED: 복잡한 health check와 heartbeat 제거
+                # 단순히 데이터 전송 루프만 실행
+                await data_sender.send_loop()
                 
         except websockets.exceptions.ConnectionClosed as e:
             print(f"🔌 WebSocket connection closed: {e}")
@@ -648,8 +659,6 @@ def main():
     
     # 메인 루프
     last_print = time.time()
-    last_analysis_print = time.time()
-    last_connection_check = time.time()  # 🔧 MODIFIED: 연결 상태 확인 타이머 추가
     imu_send_counter = 0
     
     while True:
@@ -668,21 +677,14 @@ def main():
             
             fall_detected = fall_result and fall_result['prediction'] == 1
             
-            # 🔧 MODIFIED: 상태 변화 추적하여 중복 감지 방지
+            # 상태 변화 추적하여 중복 감지 방지
             state_changed = state_manager.update_state(is_walking, fall_detected)
             current_state = state_manager.current_state
-            
-            # 🔧 MODIFIED: 연결 상태 모니터링 (30초마다)
-            if current_time - last_connection_check >= 30.0:
-                connection_healthy = data_sender.is_connection_healthy()
-                print(f"🔗 Connection status: {'Healthy' if connection_healthy else 'Unstable'} "
-                      f"(Reconnect attempts: {data_sender.reconnect_attempts})")
-                last_connection_check = current_time
             
             # 분석 정보 생성
             analysis_info = walking_detector.get_analysis_summary()
             
-            # 🔧 MODIFIED: 낙상 감지 시에만 알림 전송 (상태 변화 시)
+            # 낙상 감지 시에만 알림 전송 (상태 변화 시)
             if fall_detected and state_changed and current_state == UserState.FALL:
                 print(f"🚨 FALL DETECTED! Probability: {fall_result['probability']:.2%} (Threshold: {FALL_DETECTION_THRESHOLD})")
                 if data_sender.is_connection_healthy():
@@ -692,9 +694,14 @@ def main():
                 else:
                     print("⚠️ Fall data pending due to unstable connection")
             
-            # 🆕 낙상 감지 결과 디버그 출력 (임계값 미만일 때)
+            # 낙상 감지 결과 디버그 출력 (임계값 미만일 때)
             elif fall_result and fall_result['probability'] > 0.3:
-                print(f"🟡 Fall probability: {fall_result['probability']:.2%} (below threshold {FALL_DETECTION_THRESHOLD})")
+                # 로그 스팸 방지 - suppress_log 플래그 확인
+                if not fall_result.get('suppress_log', False):
+                    print(f"🟡 Fall probability: {fall_result['probability']:.2%} (below threshold {FALL_DETECTION_THRESHOLD})")
+                elif fall_result.get('suppress_log', False) and current_time - last_print >= 30.0:
+                    # 30초마다 한 번씩은 출력 (완전히 숨기지 않음)
+                    print(f"🟡 Fall probability: {fall_result['probability']:.2%} (repeated {fall_detector.same_probability_count} times)")
             
             # IMU 데이터 전송 (보행 중일 때만)
             elif current_state == UserState.WALKING:
@@ -705,25 +712,21 @@ def main():
                         data_sender.add_imu_data(imu_package)
                     imu_send_counter = 0
             
-            # 기본 상태 출력 (10초마다)
+            # 🔧 MODIFIED: 기본 상태 출력 간소화 (10초마다)
             if current_time - last_print >= 10.0:
                 connection_status = "Connected" if data_sender.is_connection_healthy() else "Disconnected"
-                # 🔧 MODIFIED: 보행 감지 상세 정보 추가
-                walking_status = f"Walking: {is_walking} (conf: {walk_confidence:.3f}, cons: {walking_detector.consecutive_walking}/{walking_detector.consecutive_idle})"
+                walking_status = f"Walking: {is_walking} (conf: {walk_confidence:.3f})"
                 print(f"📊 State: {current_state.value}, {walking_status}, Connection: {connection_status}")
+                
+                # 🔧 MODIFIED: 센서 상태만 간단히 출력
+                if hasattr(sensor, 'last_raw_data') and sensor.last_raw_data:
+                    acc_magnitude = np.sqrt(sensor.last_raw_data[0]**2 + sensor.last_raw_data[1]**2 + sensor.last_raw_data[2]**2)
+                    print(f"   📐 Sensor: Acc={acc_magnitude:.3f}g")
+                    
+                    if sensor.same_data_count > 0:
+                        print(f"   ⚠️ Sensor data unchanged for {sensor.same_data_count} readings")
+                
                 last_print = current_time
-            
-            # ROC 분석 상세 출력 (30초마다, 보행 중일 때)
-            if (current_time - last_analysis_print >= 30.0 and is_walking):
-                analysis = walking_detector.get_analysis_summary()
-                print(f"🔬 ROC Analysis Detail:")
-                print(f"   📈 Acc Mean: {analysis.get('acc_mean', 0):.3f}, "
-                      f"Std: {analysis.get('acc_std', 0):.3f}")
-                print(f"   👣 Step Freq: {analysis.get('step_frequency', 0):.2f}Hz, "
-                      f"Regularity: {analysis.get('regularity', 0):.3f}")
-                print(f"   🎯 ROC Confidence: {analysis.get('confidence', 0):.3f}, "
-                      f"Peaks: {analysis.get('peaks_count', 0)}")
-                last_analysis_print = current_time
             
             time.sleep(1.0 / SAMPLING_RATE)
             
@@ -732,4 +735,4 @@ def main():
             time.sleep(1)
 
 if __name__ == "__main__":
-    main() 
+    main()
