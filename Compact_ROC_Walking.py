@@ -3,6 +3,7 @@ Compact ROC-based Walking Detection for Raspberry Pi
 - 과학적 ROC 분석 기반 (F1 Score: 0.641)
 - KFall 데이터셋 32명, 21,696윈도우 분석 결과
 - 핵심 기능만 간결하게 구현 (300줄 이하)
+- 🔧 수정: 센서 정규화, 낙상 감지 타이밍, 상태 관리 버그 수정
 """
 
 import time
@@ -34,6 +35,7 @@ ACCEL_REGS = [0x3B, 0x3D, 0x3F]
 GYRO_REGS = [0x43, 0x45, 0x47]
 SENS_ACCEL, SENS_GYRO = 16384.0, 131.0
 MODEL_PATH = 'models/fall_detection.tflite'
+SCALERS_DIR = 'scalers'
 SEQ_LENGTH, STRIDE = 150, 5
 USER_ID = "raspberry_pi_01"
 WS_SERVER = "ws://192.168.0.177:8000"
@@ -126,13 +128,38 @@ class ROCWalkingDetector:
                 print(f"🚶 Walking stopped")
 
 class CompactSensor:
-    """간소화된 센서"""
+    """🔧 개선된 센서 (정규화 포함)"""
     def __init__(self):
         if not SENSOR_AVAILABLE:
             raise ImportError("SMBus2 missing")
         self.bus = SMBus(1)
         self.bus.write_byte_data(DEV_ADDR, PWR_MGMT_1, 0)
         time.sleep(0.1)
+        
+        # 🔧 스케일러 로드 추가
+        self.scalers = self._load_scalers()
+        print(f"📊 Loaded {len(self.scalers)} scalers for normalization")
+
+    def _load_scalers(self):
+        """스케일러 로드"""
+        scalers = {}
+        features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+        
+        for feature in features:
+            try:
+                std_path = os.path.join(SCALERS_DIR, f"{feature}_standard_scaler.pkl")
+                minmax_path = os.path.join(SCALERS_DIR, f"{feature}_minmax_scaler.pkl")
+                
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with open(std_path, 'rb') as f:
+                        scalers[f"{feature}_standard"] = pickle.load(f)
+                    with open(minmax_path, 'rb') as f:
+                        scalers[f"{feature}_minmax"] = pickle.load(f)
+            except Exception:
+                print(f"⚠️ Failed to load scaler {feature}")
+        
+        return scalers
 
     def _read_word_2c(self, reg):
         high = self.bus.read_byte_data(DEV_ADDR, reg)
@@ -141,62 +168,107 @@ class CompactSensor:
         return -((65535 - val) + 1) if val >= 0x8000 else val
 
     def get_data(self):
-        data = []
+        """🔧 정규화된 센서 데이터"""
+        raw_data = []
         for reg in ACCEL_REGS:
-            data.append(self._read_word_2c(reg) / SENS_ACCEL)
+            raw_data.append(self._read_word_2c(reg) / SENS_ACCEL)
         for reg in GYRO_REGS:
-            data.append(self._read_word_2c(reg) / SENS_GYRO)
-        return np.array(data)
+            raw_data.append(self._read_word_2c(reg) / SENS_GYRO)
+        
+        # 🔧 정규화 적용
+        if self.scalers:
+            features = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+            normalized = []
+            for i, feature in enumerate(features):
+                val = raw_data[i]
+                
+                if f"{feature}_standard" in self.scalers:
+                    scaler = self.scalers[f"{feature}_standard"]
+                    val = (val - scaler.mean_[0]) / scaler.scale_[0]
+                
+                if f"{feature}_minmax" in self.scalers:
+                    scaler = self.scalers[f"{feature}_minmax"]
+                    val = val * scaler.scale_[0] + scaler.min_[0]
+                
+                normalized.append(val)
+            return np.array(normalized)
+        
+        return np.array(raw_data)
 
 class CompactFallDetector:
-    """간소화된 낙상 감지"""
+    """🔧 개선된 낙상 감지 (타이밍 로직 수정)"""
     def __init__(self):
         self.buffer = deque(maxlen=SEQ_LENGTH)
         self.counter = 0
         self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
         self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        print("🔧 Fall detector with proper timing loaded")
 
     def add_data(self, data):
         self.buffer.append(data)
         self.counter += 1
 
+    def should_predict(self):
+        """🔧 예측 타이밍 체크 추가"""
+        return len(self.buffer) == SEQ_LENGTH and self.counter % STRIDE == 0
+
     def predict(self):
-        if len(self.buffer) < SEQ_LENGTH or self.counter % STRIDE != 0:
+        """🔧 타이밍 체크 후 예측"""
+        if not self.should_predict():
             return None
+            
         try:
             input_data = np.expand_dims(np.array(list(self.buffer)), axis=0).astype(np.float32)
-            self.interpreter.set_tensor(self.interpreter.get_input_details()[0]['index'], input_data)
+            self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
             self.interpreter.invoke()
-            output = self.interpreter.get_tensor(self.interpreter.get_output_details()[0]['index'])
+            output = self.interpreter.get_tensor(self.output_details[0]['index'])
             prob = float(output.flatten()[0])
             return {'prediction': 1 if prob >= 0.5 else 0, 'probability': prob}
-        except:
+        except Exception as e:
+            print(f"🔧 Prediction error: {e}")
             return None
 
 class StateManager:
-    """상태 관리"""
+    """🔧 상태 관리 (타이밍 버그 수정)"""
     def __init__(self):
         self.state = UserState.DAILY
         self.state_time = time.time()
         self.last_fall = None
+        print("🔧 State manager with proper timing initialized")
         
     def update(self, is_walking, fall_detected):
         current_time = time.time()
         
+        # 🔧 낙상 감지 (쿨다운 포함)
         if fall_detected and (not self.last_fall or current_time - self.last_fall > 10):
             self.state = UserState.FALL
+            self.state_time = current_time  # 🔧 타이밍 업데이트 추가
             self.last_fall = current_time
+            print(f"🔧 Fall detected! State changed to {self.state.value}")
             return True
+            
+        # 🔧 보행 시작
         elif self.state == UserState.DAILY and is_walking:
             self.state = UserState.WALKING
+            self.state_time = current_time  # 🔧 타이밍 업데이트 추가
             return True
+            
+        # 🔧 보행 종료 (3초 대기)
         elif self.state == UserState.WALKING and not is_walking:
             if current_time - self.state_time > 3:
                 self.state = UserState.DAILY
+                self.state_time = current_time  # 🔧 타이밍 업데이트 추가
                 return True
+                
+        # 🔧 낙상 복구 (3초 후)
         elif self.state == UserState.FALL and current_time - self.state_time > 3:
             self.state = UserState.DAILY
+            self.state_time = current_time  # 🔧 타이밍 업데이트 추가
+            print(f"🔧 Recovered from fall, back to {self.state.value}")
             return True
+            
         return False
 
 class DataSender:
@@ -291,9 +363,12 @@ def main():
             # ROC 보행 감지
             is_walking, confidence = walking_detector.detect(data[0], data[1], data[2])
             
-            # 낙상 감지
+            # 🔧 낙상 감지 (타이밍 체크 추가)
             fall_detector.add_data(data)
-            fall_result = fall_detector.predict()
+            fall_result = None
+            if fall_detector.should_predict():  # 🔧 타이밍 체크 추가
+                fall_result = fall_detector.predict()
+            
             fall_detected = fall_result and fall_result['prediction'] == 1
             
             # 상태 업데이트
@@ -321,16 +396,17 @@ def main():
                     data_sender.send_data('imu_data', imu_data, analysis)
                     send_counter = 0
             
-            # 상태 출력 (10초마다)
-            if current_time - last_print >= 10:
-                print(f"📊 {state_manager.state.value}, ROC Walk: {is_walking}, "
+            # 🔧 상태 출력 개선 (5초마다)
+            if current_time - last_print >= 5:
+                state_duration = current_time - state_manager.state_time
+                print(f"📊 {state_manager.state.value} ({state_duration:.1f}s), ROC Walk: {is_walking}, "
                       f"Conf: {confidence:.3f}, WS: {data_sender.connected}")
                 last_print = current_time
             
             time.sleep(0.01)  # 100Hz
             
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"🔧 Error: {e}")
             time.sleep(1)
 
 if __name__ == "__main__":
