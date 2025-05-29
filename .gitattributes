@@ -1,3 +1,6 @@
+# 모든 텍스트 파일은 LF로 관리 (기본 설정)
+* text=auto eol=lf
+
 # 파이썬, 쉘, 텍스트 파일은 항상 LF로 관리
 *.py text eol=lf
 *.sh text eol=lf
@@ -12,6 +15,44 @@
 *.conf text eol=lf
 *.ini text eol=lf
 
+# 웹 관련 파일들
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.vue text eol=lf
+
+# Docker 관련 파일
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+docker-compose*.yml text eol=lf
+
+# 기타 개발 파일들
+*.xml text eol=lf
+*.sql text eol=lf
+*.csv text eol=lf
+*.log text eol=lf
+*.env text eol=lf
+*.env.* text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
 # Windows 실행 파일은 바이너리로
 *.exe binary
 *.dll binary
+
+# 이미지 파일들은 바이너리로
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
+
+# 기타 바이너리 파일들
+*.zip binary
+*.tar binary
+*.gz binary
+*.pdf binary
