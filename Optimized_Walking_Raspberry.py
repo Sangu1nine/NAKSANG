@@ -52,10 +52,12 @@ WEBSOCKET_SERVER_PORT = 8000
 USER_ID = "raspberry_pi_01"
 KST = timezone(timedelta(hours=9))
 
-# 🔧 MODIFIED: 낙상 감지 안정성 개선
-FALL_COOLDOWN_TIME = 30.0  # 낙상 쿨다운 시간 30초로 증가
+# 🔧 MODIFIED: 낙상 감지 안정성 개선 - 임계값 조정
+FALL_COOLDOWN_TIME = 20.0  # 낙상 쿨다운 시간 20초로 감소 (30초 → 20초)
 RECONNECT_DELAY = 5.0      # 재연결 대기 시간
 MAX_RECONNECT_ATTEMPTS = 10  # 최대 재연결 시도
+# 🆕 낙상 감지 임계값 추가
+FALL_DETECTION_THRESHOLD = 0.7  # 낙상 감지 임계값을 0.7로 상향 조정
 
 class UserState(Enum):
     DAILY = "Idle"
@@ -220,12 +222,12 @@ class OptimizedROCWalkingDetector:
         return confidence
 
     def _update_walking_state(self, confidence_score, current_time):
-        """안정성 체크 및 상태 업데이트"""
+        """안정성 체크 및 상태 업데이트 - 🔧 MODIFIED: 반응성 개선"""
         self.confidence = confidence_score
         new_walking = confidence_score >= self.ROC_THRESHOLDS['confidence_min']
         
-        # 디바운싱 (1초)
-        if current_time - self.last_state_change < 1.0:
+        # 🔧 MODIFIED: 디바운싱 시간 단축 (1초 → 0.5초)
+        if current_time - self.last_state_change < 0.5:
             return
         
         # 연속 감지 카운트
@@ -236,17 +238,17 @@ class OptimizedROCWalkingDetector:
             self.consecutive_idle += 1
             self.consecutive_walking = 0
         
-        # 보행 시작: 연속 3회 감지
-        if not self.is_walking and self.consecutive_walking >= 3:
+        # 🔧 MODIFIED: 보행 시작 조건 완화 (연속 3회 → 2회)
+        if not self.is_walking and self.consecutive_walking >= 2:
             self.is_walking = True
             self.walking_start_time = current_time
             self.last_state_change = current_time
             print(f"🚶 ROC Walking started (Confidence: {confidence_score:.3f})")
         
-        # 보행 종료: 연속 5회 미감지 + 최소 2초 지속
-        elif (self.is_walking and self.consecutive_idle >= 5 and
+        # 🔧 MODIFIED: 보행 종료 조건 완화 (연속 5회 → 3회, 최소 2초 → 1.5초)
+        elif (self.is_walking and self.consecutive_idle >= 3 and
               self.walking_start_time and 
-              current_time - self.walking_start_time >= 2.0):
+              current_time - self.walking_start_time >= 1.5):
             self.is_walking = False
             self.last_state_change = current_time
             duration = current_time - self.walking_start_time
@@ -263,7 +265,7 @@ class OptimizedROCWalkingDetector:
         }
 
 class OptimizedStateManager:
-    """최적화된 상태 관리자"""
+    """Optimized state manager"""
     def __init__(self):
         self.current_state = UserState.DAILY
         self.state_start_time = time.time()
@@ -280,13 +282,14 @@ class OptimizedStateManager:
             self.state_start_time = current_time
             return True
         
-        # 보행 상태 전환
+        # 🔧 MODIFIED: 보행 상태 전환 조건 완화
         elif self.current_state == UserState.DAILY and is_walking:
             self.current_state = UserState.WALKING
             self.state_start_time = current_time
             return True
         elif self.current_state == UserState.WALKING and not is_walking:
-            if current_time - self.state_start_time > 3.0:
+            # 🔧 MODIFIED: 보행 종료 대기 시간 단축 (3초 → 2초)
+            if current_time - self.state_start_time > 2.0:
                 self.current_state = UserState.DAILY
                 self.state_start_time = current_time
                 return True
@@ -309,7 +312,7 @@ class OptimizedStateManager:
         return self.current_state != UserState.DAILY
 
 class OptimizedDataSender:
-    """최적화된 데이터 전송"""
+    """Optimized data sender"""
     def __init__(self):
         self.imu_queue = queue.Queue(maxsize=30)
         self.fall_queue = queue.Queue(maxsize=50)
@@ -359,15 +362,15 @@ class OptimizedDataSender:
             # 🔧 MODIFIED: 연결 안정성 추적
             self.connection_stable = True
         except Exception as e:
-            print(f"데이터 전송 실패: {e}")
+            print(f"Data transmission failed: {e}")
             self.connection_stable = False
     
     def is_connection_healthy(self):
-        """연결 상태 확인"""
+        """Check connection status"""
         return self.connected and self.connection_stable and self.websocket is not None
 
 class OptimizedSensor:
-    """최적화된 센서 클래스"""
+    """Optimized sensor class"""
     def __init__(self):
         if not SENSOR_AVAILABLE:
             raise ImportError("Sensor library missing.")
@@ -430,7 +433,7 @@ class OptimizedSensor:
         return np.array(raw_data)
 
 class OptimizedFallDetector:
-    """최적화된 낙상 감지기"""
+    """Optimized fall detector"""
     def __init__(self):
         self.buffer = deque(maxlen=SEQ_LENGTH)
         self.counter = 0
@@ -457,7 +460,7 @@ class OptimizedFallDetector:
             output = self.interpreter.get_tensor(self.output_details[0]['index'])
             
             fall_prob = float(output.flatten()[0])
-            prediction = 1 if fall_prob >= 0.5 else 0
+            prediction = 1 if fall_prob >= FALL_DETECTION_THRESHOLD else 0
             
             return {'prediction': prediction, 'probability': fall_prob}
             
@@ -465,7 +468,7 @@ class OptimizedFallDetector:
             return None
 
 def create_imu_package(data, user_id, analysis_info=None):
-    """IMU 데이터 패키지 생성 - 상태 정보 포함"""
+    """Create IMU data package - includes state information"""
     package = {
         'type': 'imu_data',
         'data': {
@@ -483,14 +486,14 @@ def create_imu_package(data, user_id, analysis_info=None):
     if analysis_info:
         package['roc_analysis'] = analysis_info
         package['state_info'] = {
-            'state': analysis_info.get('walking', False) and '걷기' or '일상',
+            'state': analysis_info.get('walking', False) and 'Walking' or 'Daily',
             'confidence': analysis_info.get('confidence', 0.0),
             'timestamp': datetime.now(KST).isoformat()
         }
     return package
 
 def create_fall_package(user_id, probability, sensor_data, analysis_info=None):
-    """낙상 데이터 패키지 생성 - 상태 정보 포함"""
+    """Create fall data package - includes state information"""
     package = {
         'type': 'fall_detection',
         'data': {
@@ -508,19 +511,19 @@ def create_fall_package(user_id, probability, sensor_data, analysis_info=None):
     if analysis_info:
         package['roc_analysis'] = analysis_info
         package['state_info'] = {
-            'state': '낙상',
+            'state': 'Fall',
             'confidence': float(probability),
             'timestamp': datetime.now(KST).isoformat()
         }
     return package
 
 async def websocket_handler(data_sender):
-    """WebSocket 연결 핸들러 - 개선된 재연결 로직"""
+    """WebSocket connection handler - Enhanced reconnection logic"""
     url = f"ws://{WEBSOCKET_SERVER_IP}:{WEBSOCKET_SERVER_PORT}/ws/{USER_ID}"
     
     while True:
         try:
-            print(f"🔄 WebSocket 연결 시도... (시도 {data_sender.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
+            print(f"🔄 WebSocket connection attempt... (Attempt {data_sender.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
             
             # 🔧 MODIFIED: ping 설정 개선 및 연결 안정성 향상
             async with websockets.connect(
@@ -546,7 +549,7 @@ async def websocket_handler(data_sender):
                         "status": "connected"
                     }))
                 except Exception as e:
-                    print(f"연결 확인 메시지 전송 실패: {e}")
+                    print(f"Connection confirmation message failed: {e}")
                 
                 # 🆕 주기적 연결 상태 확인 태스크 추가
                 async def periodic_health_check():
@@ -560,7 +563,7 @@ async def websocket_handler(data_sender):
                                     "timestamp": datetime.now(KST).isoformat()
                                 }))
                         except Exception as e:
-                            print(f"💓 연결 상태 확인 실패: {e}")
+                            print(f"💓 Connection health check failed: {e}")
                             break
                 
                 # 태스크 동시 실행
@@ -582,9 +585,9 @@ async def websocket_handler(data_sender):
                         pass
                 
         except websockets.exceptions.ConnectionClosed as e:
-            print(f"🔌 WebSocket 연결 종료됨: {e}")
+            print(f"🔌 WebSocket connection closed: {e}")
         except Exception as e:
-            print(f"❌ WebSocket 연결 오류: {e}")
+            print(f"❌ WebSocket connection error: {e}")
         finally:
             data_sender.websocket = None
             data_sender.connected = False
@@ -594,16 +597,16 @@ async def websocket_handler(data_sender):
         
         # 재연결 대기 및 제한
         if data_sender.reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
-            print(f"❌ 최대 재연결 시도 횟수 초과 ({MAX_RECONNECT_ATTEMPTS})")
+            print(f"❌ Max reconnection attempts exceeded ({MAX_RECONNECT_ATTEMPTS})")
             await asyncio.sleep(30)  # 30초 대기 후 재시작
             data_sender.reconnect_attempts = 0
         else:
             retry_delay = min(RECONNECT_DELAY * (2 ** data_sender.reconnect_attempts), 30)
-            print(f"⏳ {retry_delay}초 후 재연결 시도...")
+            print(f"⏳ Retrying connection in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
 
 def main():
-    """메인 함수"""
+    """Main function"""
     print("🚀 Optimized ROC-based Fall Detection System")
     print("📊 Scientific Analysis + Raspberry Pi Optimization")
     print(f"🎯 KFall Dataset: F1 Score 0.641, 32 subjects, 21,696 windows")
@@ -672,8 +675,8 @@ def main():
             # 🔧 MODIFIED: 연결 상태 모니터링 (30초마다)
             if current_time - last_connection_check >= 30.0:
                 connection_healthy = data_sender.is_connection_healthy()
-                print(f"🔗 연결 상태: {'건강함' if connection_healthy else '불안정'} "
-                      f"(재연결 시도: {data_sender.reconnect_attempts})")
+                print(f"🔗 Connection status: {'Healthy' if connection_healthy else 'Unstable'} "
+                      f"(Reconnect attempts: {data_sender.reconnect_attempts})")
                 last_connection_check = current_time
             
             # 분석 정보 생성
@@ -681,13 +684,17 @@ def main():
             
             # 🔧 MODIFIED: 낙상 감지 시에만 알림 전송 (상태 변화 시)
             if fall_detected and state_changed and current_state == UserState.FALL:
-                print(f"🚨 FALL DETECTED! Confidence: {fall_result['probability']:.2%}")
+                print(f"🚨 FALL DETECTED! Probability: {fall_result['probability']:.2%} (Threshold: {FALL_DETECTION_THRESHOLD})")
                 if data_sender.is_connection_healthy():
                     fall_package = create_fall_package(USER_ID, fall_result['probability'], data, analysis_info)
                     data_sender.add_fall_data(fall_package)
-                    print("📤 낙상 알림 전송됨")
+                    print("📤 Fall alert sent")
                 else:
-                    print("⚠️ 연결 불안정으로 낙상 데이터 전송 대기")
+                    print("⚠️ Fall data pending due to unstable connection")
+            
+            # 🆕 낙상 감지 결과 디버그 출력 (임계값 미만일 때)
+            elif fall_result and fall_result['probability'] > 0.3:
+                print(f"🟡 Fall probability: {fall_result['probability']:.2%} (below threshold {FALL_DETECTION_THRESHOLD})")
             
             # IMU 데이터 전송 (보행 중일 때만)
             elif current_state == UserState.WALKING:
@@ -700,9 +707,10 @@ def main():
             
             # 기본 상태 출력 (10초마다)
             if current_time - last_print >= 10.0:
-                connection_status = "연결됨" if data_sender.is_connection_healthy() else "연결 안됨"
-                print(f"📊 State: {current_state.value}, ROC Walking: {is_walking}, "
-                      f"Confidence: {walk_confidence:.3f}, Connection: {connection_status}")
+                connection_status = "Connected" if data_sender.is_connection_healthy() else "Disconnected"
+                # 🔧 MODIFIED: 보행 감지 상세 정보 추가
+                walking_status = f"Walking: {is_walking} (conf: {walk_confidence:.3f}, cons: {walking_detector.consecutive_walking}/{walking_detector.consecutive_idle})"
+                print(f"📊 State: {current_state.value}, {walking_status}, Connection: {connection_status}")
                 last_print = current_time
             
             # ROC 분석 상세 출력 (30초마다, 보행 중일 때)
