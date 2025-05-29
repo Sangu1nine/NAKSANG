@@ -522,11 +522,14 @@ async def websocket_handler(data_sender):
         try:
             print(f"🔄 WebSocket 연결 시도... (시도 {data_sender.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
             
+            # 🔧 MODIFIED: ping 설정 개선 및 연결 안정성 향상
             async with websockets.connect(
                 url,
-                ping_interval=20,  # 20초마다 핑
-                ping_timeout=10,   # 10초 타임아웃
-                close_timeout=5    # 5초 종료 타임아웃
+                ping_interval=30,    # 30초마다 핑 (증가)
+                ping_timeout=15,     # 15초 타임아웃 (증가)
+                close_timeout=10,    # 10초 종료 타임아웃 (증가)
+                max_size=2**20,      # 1MB 최대 메시지 크기
+                compression=None     # 압축 비활성화로 성능 향상
             ) as websocket:
                 data_sender.websocket = websocket
                 data_sender.connected = True
@@ -539,12 +542,44 @@ async def websocket_handler(data_sender):
                     await websocket.send(json.dumps({
                         "type": "connection_health_check",
                         "user_id": USER_ID,
-                        "timestamp": datetime.now(KST).isoformat()
+                        "timestamp": datetime.now(KST).isoformat(),
+                        "status": "connected"
                     }))
                 except Exception as e:
                     print(f"연결 확인 메시지 전송 실패: {e}")
                 
-                await data_sender.send_loop()
+                # 🆕 주기적 연결 상태 확인 태스크 추가
+                async def periodic_health_check():
+                    while data_sender.connected:
+                        try:
+                            await asyncio.sleep(25)  # 25초마다 체크
+                            if data_sender.websocket:
+                                await data_sender.websocket.send(json.dumps({
+                                    "type": "heartbeat",
+                                    "user_id": USER_ID,
+                                    "timestamp": datetime.now(KST).isoformat()
+                                }))
+                        except Exception as e:
+                            print(f"💓 연결 상태 확인 실패: {e}")
+                            break
+                
+                # 태스크 동시 실행
+                health_task = asyncio.create_task(periodic_health_check())
+                send_task = asyncio.create_task(data_sender.send_loop())
+                
+                # 어느 하나라도 종료되면 전체 종료
+                done, pending = await asyncio.wait(
+                    [health_task, send_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # 남은 태스크 정리
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
                 
         except websockets.exceptions.ConnectionClosed as e:
             print(f"🔌 WebSocket 연결 종료됨: {e}")
@@ -630,8 +665,8 @@ def main():
             
             fall_detected = fall_result and fall_result['prediction'] == 1
             
-            # 상태 업데이트
-            state_manager.update_state(is_walking, fall_detected)
+            # 🔧 MODIFIED: 상태 변화 추적하여 중복 감지 방지
+            state_changed = state_manager.update_state(is_walking, fall_detected)
             current_state = state_manager.current_state
             
             # 🔧 MODIFIED: 연결 상태 모니터링 (30초마다)
@@ -641,17 +676,20 @@ def main():
                       f"(재연결 시도: {data_sender.reconnect_attempts})")
                 last_connection_check = current_time
             
-            # 데이터 전송 (연결이 건강할 때만)
+            # 분석 정보 생성
             analysis_info = walking_detector.get_analysis_summary()
             
-            if fall_detected:
+            # 🔧 MODIFIED: 낙상 감지 시에만 알림 전송 (상태 변화 시)
+            if fall_detected and state_changed and current_state == UserState.FALL:
                 print(f"🚨 FALL DETECTED! Confidence: {fall_result['probability']:.2%}")
                 if data_sender.is_connection_healthy():
                     fall_package = create_fall_package(USER_ID, fall_result['probability'], data, analysis_info)
                     data_sender.add_fall_data(fall_package)
+                    print("📤 낙상 알림 전송됨")
                 else:
                     print("⚠️ 연결 불안정으로 낙상 데이터 전송 대기")
             
+            # IMU 데이터 전송 (보행 중일 때만)
             elif current_state == UserState.WALKING:
                 imu_send_counter += 1
                 if imu_send_counter >= (SAMPLING_RATE // SEND_RATE):
