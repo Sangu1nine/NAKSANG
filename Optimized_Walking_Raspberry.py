@@ -52,6 +52,11 @@ WEBSOCKET_SERVER_PORT = 8000
 USER_ID = "raspberry_pi_01"
 KST = timezone(timedelta(hours=9))
 
+# 🔧 MODIFIED: 낙상 감지 안정성 개선
+FALL_COOLDOWN_TIME = 30.0  # 낙상 쿨다운 시간 30초로 증가
+RECONNECT_DELAY = 5.0      # 재연결 대기 시간
+MAX_RECONNECT_ATTEMPTS = 10  # 최대 재연결 시도
+
 class UserState(Enum):
     DAILY = "Idle"
     WALKING = "Walking"
@@ -263,7 +268,7 @@ class OptimizedStateManager:
         self.current_state = UserState.DAILY
         self.state_start_time = time.time()
         self.last_fall_time = None
-        self.fall_cooldown = 10.0
+        self.fall_cooldown = FALL_COOLDOWN_TIME  # 🔧 MODIFIED: 쿨다운 시간 증가
 
     def update_state(self, is_walking, fall_detected):
         current_time = time.time()
@@ -310,6 +315,10 @@ class OptimizedDataSender:
         self.fall_queue = queue.Queue(maxsize=50)
         self.websocket = None
         self.connected = False
+        # 🔧 MODIFIED: 재연결 관리 추가
+        self.reconnect_attempts = 0
+        self.last_disconnect_time = 0
+        self.connection_stable = False
 
     def add_imu_data(self, data):
         try:
@@ -347,8 +356,15 @@ class OptimizedDataSender:
         try:
             json_data = json.dumps(data, ensure_ascii=False)
             await self.websocket.send(json_data)
-        except Exception:
-            pass
+            # 🔧 MODIFIED: 연결 안정성 추적
+            self.connection_stable = True
+        except Exception as e:
+            print(f"데이터 전송 실패: {e}")
+            self.connection_stable = False
+    
+    def is_connection_healthy(self):
+        """연결 상태 확인"""
+        return self.connected and self.connection_stable and self.websocket is not None
 
 class OptimizedSensor:
     """최적화된 센서 클래스"""
@@ -449,7 +465,7 @@ class OptimizedFallDetector:
             return None
 
 def create_imu_package(data, user_id, analysis_info=None):
-    """IMU 데이터 패키지 생성"""
+    """IMU 데이터 패키지 생성 - 상태 정보 포함"""
     package = {
         'type': 'imu_data',
         'data': {
@@ -463,12 +479,18 @@ def create_imu_package(data, user_id, analysis_info=None):
             'gyr_z': float(data[5])
         }
     }
+    # 🔧 MODIFIED: ROC 분석 정보와 상태 정보 추가
     if analysis_info:
         package['roc_analysis'] = analysis_info
+        package['state_info'] = {
+            'state': analysis_info.get('walking', False) and '걷기' or '일상',
+            'confidence': analysis_info.get('confidence', 0.0),
+            'timestamp': datetime.now(KST).isoformat()
+        }
     return package
 
 def create_fall_package(user_id, probability, sensor_data, analysis_info=None):
-    """낙상 데이터 패키지 생성"""
+    """낙상 데이터 패키지 생성 - 상태 정보 포함"""
     package = {
         'type': 'fall_detection',
         'data': {
@@ -482,33 +504,68 @@ def create_fall_package(user_id, probability, sensor_data, analysis_info=None):
             }
         }
     }
+    # 🔧 MODIFIED: ROC 분석 정보와 상태 정보 추가
     if analysis_info:
         package['roc_analysis'] = analysis_info
+        package['state_info'] = {
+            'state': '낙상',
+            'confidence': float(probability),
+            'timestamp': datetime.now(KST).isoformat()
+        }
     return package
 
 async def websocket_handler(data_sender):
-    """WebSocket 연결 핸들러"""
+    """WebSocket 연결 핸들러 - 개선된 재연결 로직"""
     url = f"ws://{WEBSOCKET_SERVER_IP}:{WEBSOCKET_SERVER_PORT}/ws/{USER_ID}"
-    retry_delay = 1
     
     while True:
         try:
-            async with websockets.connect(url) as websocket:
+            print(f"🔄 WebSocket 연결 시도... (시도 {data_sender.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
+            
+            async with websockets.connect(
+                url,
+                ping_interval=20,  # 20초마다 핑
+                ping_timeout=10,   # 10초 타임아웃
+                close_timeout=5    # 5초 종료 타임아웃
+            ) as websocket:
                 data_sender.websocket = websocket
                 data_sender.connected = True
-                retry_delay = 1
+                data_sender.connection_stable = True
+                data_sender.reconnect_attempts = 0
                 print("✅ WebSocket connected")
+                
+                # 연결 성공 메시지 전송
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "connection_health_check",
+                        "user_id": USER_ID,
+                        "timestamp": datetime.now(KST).isoformat()
+                    }))
+                except Exception as e:
+                    print(f"연결 확인 메시지 전송 실패: {e}")
                 
                 await data_sender.send_loop()
                 
-        except Exception:
-            pass
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"🔌 WebSocket 연결 종료됨: {e}")
+        except Exception as e:
+            print(f"❌ WebSocket 연결 오류: {e}")
         finally:
             data_sender.websocket = None
             data_sender.connected = False
+            data_sender.connection_stable = False
+            data_sender.last_disconnect_time = time.time()
+            data_sender.reconnect_attempts += 1
         
-        await asyncio.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 30)
+        # 재연결 대기 및 제한
+        if data_sender.reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            print(f"❌ 최대 재연결 시도 횟수 초과 ({MAX_RECONNECT_ATTEMPTS})")
+            await asyncio.sleep(30)  # 30초 대기 후 재시작
+            data_sender.reconnect_attempts = 0
+        else:
+            retry_delay = min(RECONNECT_DELAY * (2 ** data_sender.reconnect_attempts), 30)
+            print(f"⏳ {retry_delay}초 후 재연결 시도...")
+            await asyncio.sleep(retry_delay)
 
 def main():
     """메인 함수"""
@@ -554,6 +611,7 @@ def main():
     # 메인 루프
     last_print = time.time()
     last_analysis_print = time.time()
+    last_connection_check = time.time()  # 🔧 MODIFIED: 연결 상태 확인 타이머 추가
     imu_send_counter = 0
     
     while True:
@@ -576,25 +634,37 @@ def main():
             state_manager.update_state(is_walking, fall_detected)
             current_state = state_manager.current_state
             
-            # 데이터 전송
+            # 🔧 MODIFIED: 연결 상태 모니터링 (30초마다)
+            if current_time - last_connection_check >= 30.0:
+                connection_healthy = data_sender.is_connection_healthy()
+                print(f"🔗 연결 상태: {'건강함' if connection_healthy else '불안정'} "
+                      f"(재연결 시도: {data_sender.reconnect_attempts})")
+                last_connection_check = current_time
+            
+            # 데이터 전송 (연결이 건강할 때만)
             analysis_info = walking_detector.get_analysis_summary()
             
             if fall_detected:
                 print(f"🚨 FALL DETECTED! Confidence: {fall_result['probability']:.2%}")
-                fall_package = create_fall_package(USER_ID, fall_result['probability'], data, analysis_info)
-                data_sender.add_fall_data(fall_package)
+                if data_sender.is_connection_healthy():
+                    fall_package = create_fall_package(USER_ID, fall_result['probability'], data, analysis_info)
+                    data_sender.add_fall_data(fall_package)
+                else:
+                    print("⚠️ 연결 불안정으로 낙상 데이터 전송 대기")
             
             elif current_state == UserState.WALKING:
                 imu_send_counter += 1
                 if imu_send_counter >= (SAMPLING_RATE // SEND_RATE):
-                    imu_package = create_imu_package(data, USER_ID, analysis_info)
-                    data_sender.add_imu_data(imu_package)
+                    if data_sender.is_connection_healthy():
+                        imu_package = create_imu_package(data, USER_ID, analysis_info)
+                        data_sender.add_imu_data(imu_package)
                     imu_send_counter = 0
             
             # 기본 상태 출력 (10초마다)
             if current_time - last_print >= 10.0:
+                connection_status = "연결됨" if data_sender.is_connection_healthy() else "연결 안됨"
                 print(f"📊 State: {current_state.value}, ROC Walking: {is_walking}, "
-                      f"Confidence: {walk_confidence:.3f}, Connected: {data_sender.connected}")
+                      f"Confidence: {walk_confidence:.3f}, Connection: {connection_status}")
                 last_print = current_time
             
             # ROC 분석 상세 출력 (30초마다, 보행 중일 때)
