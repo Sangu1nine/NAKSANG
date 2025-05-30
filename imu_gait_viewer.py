@@ -82,7 +82,7 @@ gyro_z_buffer = deque(maxlen=buffer_size)
 
 # 이산 적분용 버퍼
 integration_buffer_size = 500
-accel_z_integration_buffer = deque(maxlen=integration_buffer_size)
+accel_y_integration_buffer = deque(maxlen=integration_buffer_size)
 time_integration_buffer = deque(maxlen=integration_buffer_size)
 
 # Initialize with some data to prevent empty graphs
@@ -146,9 +146,9 @@ def discrete_integration(data, dt):
     return integrated
 
 # HS/TO detection function
-def detect_gait_events(accel_z_data, time_data):
+def detect_gait_events(accel_y_data, time_data):
     """HS와 TO 이벤트를 감지"""
-    if len(accel_z_data) < 50:  # 최소 데이터 개수 확인
+    if len(accel_y_data) < 50:  # 최소 데이터 개수 확인
         return [], []
     
     # 샘플링 주파수 계산
@@ -160,11 +160,11 @@ def detect_gait_events(accel_z_data, time_data):
     
     try:
         # HS 감지: 음의 이산 적분
-        neg_integration = discrete_integration(-np.array(accel_z_data), dt)
+        neg_integration = discrete_integration(-np.array(accel_y_data), dt)
         filtered_neg = butter_lowpass_filter(neg_integration, cutoff_freq, fs, order=4)
         
         # TO 감지: 양의 이산 적분
-        pos_integration = discrete_integration(np.array(accel_z_data), dt)
+        pos_integration = discrete_integration(np.array(accel_y_data), dt)
         filtered_pos = butter_lowpass_filter(pos_integration, cutoff_freq, fs, order=4)
         
         # 피크 감지 (prominence >= 0.1 m/s)
@@ -269,7 +269,7 @@ def save_data():
 # Client connection handler
 def handle_client(client_socket, address):
     global received_data, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, start_time
-    global accel_z_integration_buffer, time_integration_buffer
+    global accel_y_integration_buffer, time_integration_buffer
     
     print(f"Client connected: {address}")
     buffer = ""
@@ -310,14 +310,14 @@ def handle_client(client_socket, address):
                             gyro_y_buffer.append(gyro_y)
                             gyro_z_buffer.append(gyro_z)
                             
-                            # 이산 적분을 위한 데이터 저장
-                            accel_z_integration_buffer.append(accel_z)
+                            # 이산 적분을 위한 데이터 저장 (Y축이 수직 가속도)
+                            accel_y_integration_buffer.append(accel_y)
                             time_integration_buffer.append(timestamp)
                             
                             # 주기적으로 HS/TO 감지 수행 (50개 데이터마다)
-                            if len(accel_z_integration_buffer) % 50 == 0 and len(accel_z_integration_buffer) >= 100:
+                            if len(accel_y_integration_buffer) % 50 == 0 and len(accel_y_integration_buffer) >= 100:
                                 hs_times, to_times = detect_gait_events(
-                                    list(accel_z_integration_buffer), 
+                                    list(accel_y_integration_buffer), 
                                     list(time_integration_buffer)
                                 )
                                 if hs_times or to_times:
@@ -540,8 +540,8 @@ def main():
     
     # 데이터 곡선 생성
     curves['accel_x'] = plots['accel'].plot(pen=(255,0,0), name="X-axis")
-    curves['accel_y'] = plots['accel'].plot(pen=(0,150,0), name="Y-axis")
-    curves['accel_z'] = plots['accel'].plot(pen=(0,0,255), name="Z-axis (Vertical)")
+    curves['accel_y'] = plots['accel'].plot(pen=(0,150,0), name="Y-axis (Vertical)")
+    curves['accel_z'] = plots['accel'].plot(pen=(0,0,255), name="Z-axis")
     
     curves['gyro_x'] = plots['gyro'].plot(pen=(255,0,0), name="X-axis")
     curves['gyro_y'] = plots['gyro'].plot(pen=(0,150,0), name="Y-axis")
