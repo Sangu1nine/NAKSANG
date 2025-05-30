@@ -9,14 +9,15 @@ IMU 보행 분석 뷰어 - 적분값 시각화 (IMU Gait Analysis Viewer with In
 
 기능:
 1. TCP/IP 소켓 서버를 통해 IMU 센서 데이터 수신 (포트 5000)
-2. 가속도계(X,Y,Z) 데이터 실시간 그래프 표시
-3. 수직 가속도(Y축)의 이산 적분값들 시각화
+2. 가속도계(X,Y,Z) 데이터 실시간 그래프 표시 (m/s² 단위)
+3. 수직 가속도(Y축)의 이산 적분값들 시각화 (중력 성분 제거 포함)
 4. 수직 가속도를 이용한 HS/TO 이벤트 감지 및 표시
 5. 수신된 데이터를 CSV 파일로 저장 ('received_data' 폴더)
 6. 그래프 이미지를 PNG 파일로 저장 ('saved_graphs' 폴더)
 7. HS/TO 이벤트 타임스탬프 기록
 
 HS/TO 감지 알고리즘:
+- 중력 성분 제거: y축 가속도에서 9.8m/s² (중력가속도) 차감
 - HS: 수직 가속도의 음의 이산 적분 -> 버터워스 필터링 -> 피크 감지
 - TO: 수직 가속도의 양의 이산 적분 -> 버터워스 필터링 -> 피크 감지
 - 버터워스 필터: 차단 주파수 ω=0.08 rad, 필터 차수 N=4
@@ -26,6 +27,7 @@ HS/TO 감지 알고리즘:
 - 프로그램 실행: python imu_gait_integration_viewer.py
 - IMU 센서/클라이언트를 포트 5000에 연결하면 자동으로 데이터 수신 시작
 - 데이터 형식: JSON {"timestamp": 시간, "accel": {"x":값, "y":값, "z":값}, "gyro": {"x":값, "y":값, "z":값}}
+- 가속도 데이터는 m/s² 단위여야 함
 - 키보드 단축키:
   * 'S' 키: 현재 그래프를 PNG 이미지로 저장
   * Ctrl+C: 프로그램 종료 (데이터와 그래프 자동 저장)
@@ -80,7 +82,7 @@ accel_y_buffer = deque(maxlen=buffer_size)
 accel_z_buffer = deque(maxlen=buffer_size)
 
 # 이산 적분용 버퍼
-integration_buffer_size = 500
+integration_buffer_size = 50  # 500에서 50으로 변경
 accel_y_integration_buffer = deque(maxlen=integration_buffer_size)
 time_integration_buffer = deque(maxlen=integration_buffer_size)
 
@@ -125,10 +127,15 @@ def create_data_folder():
             f.write("Timestamp,Date_Time,Event_Type\n")
         print(f"Gait event log file created: {GAIT_LOG_FILE}")
 
+# 중력 성분 제거 (y축에서 9.8m/s² 빼기)
+def remove_gravity_component(accel_y_data):
+    """y축 가속도에서 중력 성분(9.8m/s²) 제거"""
+    return np.array(accel_y_data) - 9.8
+
 # Butterworth filter implementation
 def butter_lowpass_filter(data, cutoff_freq, fs, order=4):
     """버터워스 저역통과 필터 적용"""
-    if len(data) < 30:  # 데이터가 너무 적으면 필터링하지 않음 (padlen 에러 방지)
+    if len(data) < 10:  # 30에서 10으로 변경 (padlen 에러 방지)
         return data
     
     nyquist = 0.5 * fs
@@ -157,21 +164,25 @@ def discrete_integration(data, dt):
 
 # Calculate integration values for visualization
 def calculate_integration_values(accel_y_data, time_data):
-    """적분값들을 계산하여 시각화용 버퍼에 저장"""
-    if len(accel_y_data) < 10:  # 최소 요구량 다시 줄임
+    """적분값들을 계산하여 시각화용 버퍼에 저장 (중력 성분 제거 포함)"""
+    if len(accel_y_data) < 5:
         return
     
     # 샘플링 주파수 계산
     dt = np.mean(np.diff(time_data)) if len(time_data) > 1 else 0.01
+    fs = 1.0 / dt if dt > 0 else 100
     
     try:
-        # 간단한 이산 적분만 수행 (필터링은 감지 시에만)
-        neg_integration = discrete_integration(-np.array(accel_y_data), dt)
-        pos_integration = discrete_integration(np.array(accel_y_data), dt)
+        # 중력 성분 제거 (고역통과 필터 적용)
+        gravity_removed_accel = remove_gravity_component(accel_y_data)
         
-        # 시각화 버퍼에 최신값 추가 (lock 없이)
+        # 중력 제거된 가속도로 이산 적분 수행
+        neg_integration = discrete_integration(-np.array(gravity_removed_accel), dt)
+        pos_integration = discrete_integration(np.array(gravity_removed_accel), dt)
+        
+        # 시각화 버퍼에 최신값 추가
         if len(neg_integration) > 0:
-            return neg_integration[-1], pos_integration[-1], 0, 0  # 필터링 값은 나중에
+            return neg_integration[-1], pos_integration[-1], 0, 0
         else:
             return 0, 0, 0, 0
         
@@ -180,8 +191,8 @@ def calculate_integration_values(accel_y_data, time_data):
 
 # HS/TO detection function
 def detect_gait_events(accel_y_data, time_data):
-    """HS와 TO 이벤트를 감지"""
-    if len(accel_y_data) < 100:  # 최소 데이터 개수 증가
+    """HS와 TO 이벤트를 감지 (중력 성분 제거 포함)"""
+    if len(accel_y_data) < 10:
         return [], []
     
     # 샘플링 주파수 계산
@@ -192,12 +203,15 @@ def detect_gait_events(accel_y_data, time_data):
     cutoff_freq = 0.08 / (2 * np.pi)  # rad/s to Hz
     
     try:
-        # HS 감지: 음의 이산 적분
-        neg_integration = discrete_integration(-np.array(accel_y_data), dt)
+        # 중력 성분 제거
+        gravity_removed_accel = remove_gravity_component(accel_y_data)
+        
+        # HS 감지: 음의 이산 적분 (중력 제거된 가속도 사용)
+        neg_integration = discrete_integration(-np.array(gravity_removed_accel), dt)
         filtered_neg = butter_lowpass_filter(neg_integration, cutoff_freq, fs, order=4)
         
-        # TO 감지: 양의 이산 적분
-        pos_integration = discrete_integration(np.array(accel_y_data), dt)
+        # TO 감지: 양의 이산 적분 (중력 제거된 가속도 사용)
+        pos_integration = discrete_integration(np.array(gravity_removed_accel), dt)
         filtered_pos = butter_lowpass_filter(pos_integration, cutoff_freq, fs, order=4)
         
         # 피크 감지 (prominence >= 0.1 m/s)
@@ -238,19 +252,30 @@ def process_gait_events(hs_times, to_times):
 
 # Add gait marker to graph
 def add_gait_marker(timestamp, event_type):
-    if event_type == "HS":
-        line_pen = pg.mkPen(color=(0, 0, 255), width=2, style=QtCore.Qt.DashLine)  # 파란색
-        markers_list = hs_markers
-    else:  # TO
-        line_pen = pg.mkPen(color=(255, 165, 0), width=2, style=QtCore.Qt.DashLine)  # 주황색
-        markers_list = to_markers
-    
-    acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-    int_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-    
-    markers_list.append((acc_line, int_line))
-    plots['accel'].addItem(acc_line)
-    plots['integration'].addItem(int_line)
+    try:
+        # plots가 초기화되지 않은 경우 무시
+        if 'accel' not in plots or 'integration' not in plots:
+            print(f"Plots not initialized yet, skipping marker for {event_type}")
+            return
+            
+        if event_type == "HS":
+            line_pen = pg.mkPen(color=(0, 0, 255), width=2, style=QtCore.Qt.DashLine)  # 파란색
+            markers_list = hs_markers
+        else:  # TO
+            line_pen = pg.mkPen(color=(255, 165, 0), width=2, style=QtCore.Qt.DashLine)  # 주황색
+            markers_list = to_markers
+        
+        acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+        int_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+        
+        markers_list.append((acc_line, int_line))
+        plots['accel'].addItem(acc_line)
+        plots['integration'].addItem(int_line)
+        
+        print(f"Added {event_type} marker at timestamp: {timestamp}")
+        
+    except Exception as e:
+        print(f"Error adding marker for {event_type}: {e}")
 
 # Save received data to CSV
 def save_data():
@@ -263,7 +288,7 @@ def save_data():
             
             # 메인 데이터 저장 (자이로스코프 제거)
             with open(filename, 'w') as f:
-                f.write("Time,AccX,AccY,AccZ\n")
+                f.write("Time,AccX(m/s²),AccY(m/s²),AccZ(m/s²)\n")  # 단위 표시 추가
                 for data in received_data:
                     # 자이로스코프 데이터 제외하고 가속도만 저장
                     f.write(f"{data[0]},{data[1]},{data[2]},{data[3]}\n")
@@ -344,12 +369,12 @@ def handle_client(client_socket, address):
                             accel_y_integration_buffer.append(accel_y)
                             time_integration_buffer.append(timestamp)
                             
-                            # 적분값 계산 (10개 데이터마다만 수행)
-                            if len(accel_y_integration_buffer) % 10 == 0 and len(accel_y_integration_buffer) >= 10:
+                            # 적분값 계산 (5개 데이터마다만 수행 - 10에서 5로 변경)
+                            if len(accel_y_integration_buffer) % 5 == 0 and len(accel_y_integration_buffer) >= 5:
                                 try:
                                     neg_val, pos_val, neg_filt, pos_filt = calculate_integration_values(
-                                        list(accel_y_integration_buffer)[-20:],  # 최근 20개만 사용
-                                        list(time_integration_buffer)[-20:]
+                                        list(accel_y_integration_buffer)[-10:],  # 20에서 10으로 변경
+                                        list(time_integration_buffer)[-10:]
                                     )
                                     # 버퍼에 직접 추가 (lock 내부에서)
                                     neg_integration_buffer.append(neg_val)
@@ -375,27 +400,17 @@ def handle_client(client_socket, address):
                                     neg_filtered_buffer.append(0)
                                     pos_filtered_buffer.append(0)
                             
-                            # 주기적으로 HS/TO 감지 수행 (200개 데이터마다로 변경)
-                            if len(accel_y_integration_buffer) % 200 == 0 and len(accel_y_integration_buffer) >= 300:
+                            # 주기적으로 HS/TO 감지 수행 (10개 데이터마다로 변경 - 200에서 10으로)
+                            if len(accel_y_integration_buffer) % 10 == 0 and len(accel_y_integration_buffer) >= 15:
                                 # 별도 스레드에서 실행하지 않고 직접 실행 (간단하게)
                                 try:
                                     hs_times, to_times = detect_gait_events(
-                                        list(accel_y_integration_buffer)[-200:],  # 최근 200개만 사용
-                                        list(time_integration_buffer)[-200:]
+                                        list(accel_y_integration_buffer)[-20:],  # 200에서 20으로 변경
+                                        list(time_integration_buffer)[-20:]
                                     )
                                     if hs_times or to_times:
-                                        # 간단한 처리
-                                        for hs_time in hs_times:
-                                            if not any(abs(hs_time - existing[0]) < 0.5 for existing in hs_events):
-                                                hs_events.append([hs_time, "HS"])
-                                                gait_event_queue.append(("HS", hs_time))
-                                                print(f"HS detected")
-                                        
-                                        for to_time in to_times:
-                                            if not any(abs(to_time - existing[0]) < 0.5 for existing in to_events):
-                                                to_events.append([to_time, "TO"])
-                                                gait_event_queue.append(("TO", to_time))
-                                                print(f"TO detected")
+                                        # process_gait_events 함수를 사용하여 마커 추가
+                                        process_gait_events(hs_times, to_times)
                                 except:
                                     pass  # 에러 무시
                 
@@ -624,12 +639,12 @@ def main():
     
     # 가속도 그래프
     plots['accel'] = win.addPlot(row=0, col=0)
-    plots['accel'].setTitle("Acceleration (g)")
-    plots['accel'].setLabel('left', "Acceleration", "g")
+    plots['accel'].setTitle("Acceleration (m/s²)")
+    plots['accel'].setLabel('left', "Acceleration", "m/s²")
     plots['accel'].setLabel('bottom', "Time", "")
     plots['accel'].addLegend()
     plots['accel'].showGrid(x=True, y=True)
-    plots['accel'].setYRange(-2, 2)
+    plots['accel'].setYRange(-20, 20)  # m/s² 단위에 맞게 조정 (±2g ≈ ±20m/s²)
     plots['accel'].disableAutoRange(axis=pg.ViewBox.YAxis)
     
     # 적분값 그래프 (자이로스코프 대신)

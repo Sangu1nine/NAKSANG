@@ -40,8 +40,8 @@ def twocomplements(val):
 def gyro_dps(val):
     return twocomplements(val)/sensitive_gyro
  
-def accel_g(val):
-    return twocomplements(val)/sensitive_accel
+def accel_ms2(val):
+    return (twocomplements(val)/sensitive_accel) * 9.80665  # g를 m/s^2로 변환
  
 def dist(a,b):
     return math.sqrt((a*a)+(b*b))
@@ -121,9 +121,9 @@ try:
         elapsed = current_time - start_time
         
         # 가속도 데이터 읽기
-        accel_x = accel_g(read_data(register_accel_xout_h))
-        accel_y = accel_g(read_data(register_accel_yout_h))
-        accel_z = accel_g(read_data(register_accel_zout_h))
+        accel_x = accel_ms2(read_data(register_accel_xout_h))
+        accel_y = accel_ms2(read_data(register_accel_yout_h))
+        accel_z = accel_ms2(read_data(register_accel_zout_h))
         
         # 자이로스코프 데이터 읽기
         gyro_x = gyro_dps(read_data(register_gyro_xout_h))
@@ -136,7 +136,7 @@ try:
         if wifi_connected:
             sensor_data = {
                 'timestamp': elapsed,
-                'accel': {'x': accel_x, 'y': -9.8*accel_y, 'z': accel_z},
+                'accel': {'x': accel_x, 'y': -accel_y, 'z': accel_z},
                 'gyro': {'x': gyro_x, 'y': -gyro_y, 'z': gyro_z}
             }
             send_data_queue.append(sensor_data)
@@ -144,7 +144,7 @@ try:
         # 1초에 한 번씩 진행 상황 출력
         if sample_count % 100 == 0:
             print(f"Samples: {sample_count}, Elapsed time: {elapsed:.2f}s, Sampling rate: {sample_count/elapsed:.2f}Hz")
-            print(f"Acceleration(g): X={accel_x:.2f}, Y={accel_y:.2f}, Z={accel_z:.2f}")
+            print(f"Acceleration(m/s^2): X={accel_x:.2f}, Y={accel_y:.2f}, Z={accel_z:.2f}")
             print(f"Gyroscope(°/s): X={gyro_x:.2f}, Y={gyro_y:.2f}, Z={gyro_z:.2f}")
             if wifi_connected:
                 print(f"WiFi transmission status: Connected (Queue length: {len(send_data_queue)})")
