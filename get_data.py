@@ -136,7 +136,7 @@ try:
         if wifi_connected:
             sensor_data = {
                 'timestamp': elapsed,
-                'accel': {'x': accel_x, 'y': -accel_y, 'z': accel_z},
+                'accel': {'x': accel_x, 'y': -9.8*accel_y, 'z': accel_z},
                 'gyro': {'x': gyro_x, 'y': -gyro_y, 'z': gyro_z}
             }
             send_data_queue.append(sensor_data)
