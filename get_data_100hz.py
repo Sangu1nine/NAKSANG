@@ -2,6 +2,9 @@ from smbus2 import SMBus
 from bitstring import Bits
 import math
 import time
+import pandas as pd
+import datetime
+import numpy as np
 import socket
 import json
 import threading
@@ -98,8 +101,16 @@ def close_wifi():
 # 센서 초기화
 bus.write_byte_data(DEV_ADDR,0x6B,0b00000000)
 
-print("IMU data transmission started (100Hz)")
-print("Press Ctrl+C to stop transmission")
+# 데이터 프레임 준비
+columns = ['AccX', 'AccY', 'AccZ', 'GyrX', 'GyrY', 'GyrZ']
+data = []
+
+# 파일명 설정 (현재 시간 기반)
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+filename = f"imu_data_{timestamp}.csv"
+
+print(f"Data collection started (100Hz) - Save file: {filename}")
+print("Press Ctrl+C to stop collection")
 
 # WiFi 연결 시도
 wifi_thread = None
@@ -130,6 +141,8 @@ try:
         gyro_y = gyro_dps(read_data(register_gyro_yout_h))
         gyro_z = gyro_dps(read_data(register_gyro_zout_h))
         
+        # 데이터 추가
+        data.append([accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
         sample_count += 1
         
         # WiFi로 데이터 전송 (연결된 경우)
@@ -159,7 +172,18 @@ try:
             time.sleep(sleep_time)
 
 except KeyboardInterrupt:
-    print("\nData transmission stopped!")
+    print("\nData collection stopped!")
+    
+    # 데이터프레임 생성
+    df = pd.DataFrame(data, columns=columns)
+    
+    # 인덱스 설정 (시간 기반)
+    df.index = np.arange(len(df)) / target_hz
+    df.index.name = 'Time(s)'
+    
+    # CSV 파일로 저장
+    df.to_csv(filename)
+    print(f"Data saved: {filename} (Total {len(df)} samples)")
     
 except Exception as e:
     print(f"\nError occurred: {str(e)}")
@@ -168,4 +192,4 @@ finally:
     close_wifi()
     
     bus.close()
-    print("I2C bus closed") 
+    print("I2C bus closed")

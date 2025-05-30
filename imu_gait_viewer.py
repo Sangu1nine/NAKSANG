@@ -1,33 +1,39 @@
 """
 ==================================================================
-IMU 데이터 뷰어 (Simple IMU Data Viewer)
+IMU 보행 분석 뷰어 (IMU Gait Analysis Viewer)
 ==================================================================
 
 이 프로그램은 IMU(관성 측정 장치) 센서 데이터를 실시간으로 수신하고 
-시각화하는 도구입니다.
+보행 패턴을 분석하여 HS(Heel Strike)와 TO(Toe Off)를 감지합니다.
 
 기능:
 1. TCP/IP 소켓 서버를 통해 IMU 센서 데이터 수신 (포트 5000)
 2. 가속도계(X,Y,Z) 및 자이로스코프(X,Y,Z) 데이터 실시간 그래프 표시
-3. 수신된 데이터를 CSV 파일로 저장 ('received_data' 폴더)
-4. 그래프 이미지를 PNG 파일로 저장 ('saved_graphs' 폴더)
-5. 낙상 감지 이벤트 표시 및 기록
+3. 수직 가속도를 이용한 HS/TO 이벤트 감지 및 표시
+4. 수신된 데이터를 CSV 파일로 저장 ('received_data' 폴더)
+5. 그래프 이미지를 PNG 파일로 저장 ('saved_graphs' 폴더)
+6. HS/TO 이벤트 타임스탬프 기록
+
+HS/TO 감지 알고리즘:
+- HS: 수직 가속도의 음의 이산 적분 -> 버터워스 필터링 -> 피크 감지
+- TO: 수직 가속도의 양의 이산 적분 -> 버터워스 필터링 -> 피크 감지
+- 버터워스 필터: 차단 주파수 ω=0.08 rad, 필터 차수 N=4
+- 피크 감지: 최소 돌출도 0.1 m/s
 
 사용 방법:
-- 프로그램 실행: python simple_imu_viewer_en.py
+- 프로그램 실행: python imu_gait_viewer.py
 - IMU 센서/클라이언트를 포트 5000에 연결하면 자동으로 데이터 수신 시작
 - 데이터 형식: JSON {"timestamp": 시간, "accel": {"x":값, "y":값, "z":값}, "gyro": {"x":값, "y":값, "z":값}}
-- 낙상 감지 형식: JSON {"event": "fall_detected", "timestamp": 시간, "probability": 확률}
 - 키보드 단축키:
   * 'S' 키: 현재 그래프를 PNG 이미지로 저장
   * Ctrl+C: 프로그램 종료 (데이터와 그래프 자동 저장)
 
 요구사항:
 - Python 3.6 이상
-- PyQtGraph, NumPy, PyQt5 라이브러리 필요
+- PyQtGraph, NumPy, PyQt5, SciPy 라이브러리 필요
 
 개발자: NAKSANG
-최종 수정일: 2025년 5월 13일
+최종 수정일: 2025년 1월 17일
 ==================================================================
 """
 
@@ -44,24 +50,28 @@ from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.exporters
 import numpy as np
+from scipy import signal as scipy_signal
+from scipy.signal import find_peaks
+from sklearn.linear_model import LinearRegression
 
 # Server settings
 SERVER_IP = '0.0.0.0'  # Listen on all interfaces
 SERVER_PORT = 5000
 DATA_FOLDER = 'received_data'
-GRAPH_FOLDER = 'saved_graphs'  # 그래프 저장 폴더
-FALL_LOG_FILE = os.path.join(DATA_FOLDER, 'fall_events.csv')  # 낙상 이벤트 로그 파일
+GRAPH_FOLDER = 'saved_graphs'
+GAIT_LOG_FILE = os.path.join(DATA_FOLDER, 'gait_events.csv')
 
 # Global variables
 received_data = []
-fall_events = []  # 낙상 감지 이벤트 저장
-fall_event_queue = []  # 낙상 이벤트 UI 업데이트를 위한 큐
+hs_events = []  # Heel Strike 이벤트 저장
+to_events = []  # Toe Off 이벤트 저장
+gait_event_queue = []  # 보행 이벤트 UI 업데이트를 위한 큐
 data_lock = threading.Lock()
 is_running = False
-start_time = time.time()  # 프로그램 시작 시간 저장
+start_time = time.time()
 
 # Data buffers for visualization
-buffer_size = 500  # Keep only the most recent 500 data points
+buffer_size = 1000  # 1000개 데이터 포인트 유지 (HS/TO 감지를 위해 더 많은 데이터 필요)
 time_buffer = deque(maxlen=buffer_size)
 accel_x_buffer = deque(maxlen=buffer_size)
 accel_y_buffer = deque(maxlen=buffer_size)
@@ -69,6 +79,11 @@ accel_z_buffer = deque(maxlen=buffer_size)
 gyro_x_buffer = deque(maxlen=buffer_size)
 gyro_y_buffer = deque(maxlen=buffer_size)
 gyro_z_buffer = deque(maxlen=buffer_size)
+
+# 이산 적분용 버퍼
+integration_buffer_size = 500
+accel_z_integration_buffer = deque(maxlen=integration_buffer_size)
+time_integration_buffer = deque(maxlen=integration_buffer_size)
 
 # Initialize with some data to prevent empty graphs
 for i in range(5):
@@ -86,7 +101,8 @@ app = None
 win = None
 plots = {}
 curves = {}
-fall_markers = []  # 낙상 이벤트 마커 저장
+hs_markers = []  # HS 이벤트 마커 저장
+to_markers = []  # TO 이벤트 마커 저장
 
 # Create data folder
 def create_data_folder():
@@ -94,92 +110,166 @@ def create_data_folder():
         os.makedirs(DATA_FOLDER)
         print(f"Data folder created: {DATA_FOLDER}")
     
-    # 그래프 저장 폴더 생성
     if not os.path.exists(GRAPH_FOLDER):
         os.makedirs(GRAPH_FOLDER)
         print(f"Graph folder created: {GRAPH_FOLDER}")
     
-    # 낙상 이벤트 로그 파일 생성 (없는 경우)
-    if not os.path.exists(FALL_LOG_FILE):
-        with open(FALL_LOG_FILE, 'w') as f:
-            f.write("Timestamp,Date_Time,Probability\n")
-        print(f"Fall event log file created: {FALL_LOG_FILE}")
+    if not os.path.exists(GAIT_LOG_FILE):
+        with open(GAIT_LOG_FILE, 'w') as f:
+            f.write("Timestamp,Date_Time,Event_Type\n")
+        print(f"Gait event log file created: {GAIT_LOG_FILE}")
+
+# Butterworth filter implementation
+def butter_lowpass_filter(data, cutoff_freq, fs, order=4):
+    """버터워스 저역통과 필터 적용"""
+    if len(data) < 10:  # 데이터가 너무 적으면 필터링하지 않음
+        return data
+    
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff_freq / nyquist
+    
+    # 차단 주파수가 너무 높으면 조정
+    if normal_cutoff >= 1.0:
+        normal_cutoff = 0.95
+    
+    b, a = scipy_signal.butter(order, normal_cutoff, btype='low', analog=False)
+    y = scipy_signal.filtfilt(b, a, data)
+    return y
+
+# Discrete integration
+def discrete_integration(data, dt):
+    """이산 적분 계산"""
+    if len(data) < 2:
+        return np.array(data)
+    
+    integrated = np.cumsum(data) * dt
+    return integrated
+
+# HS/TO detection function
+def detect_gait_events(accel_z_data, time_data):
+    """HS와 TO 이벤트를 감지"""
+    if len(accel_z_data) < 50:  # 최소 데이터 개수 확인
+        return [], []
+    
+    # 샘플링 주파수 계산
+    dt = np.mean(np.diff(time_data)) if len(time_data) > 1 else 0.01
+    fs = 1.0 / dt if dt > 0 else 100
+    
+    # 차단 주파수 설정 (ω=0.08 rad를 Hz로 변환)
+    cutoff_freq = 0.08 / (2 * np.pi)  # rad/s to Hz
+    
+    try:
+        # HS 감지: 음의 이산 적분
+        neg_integration = discrete_integration(-np.array(accel_z_data), dt)
+        filtered_neg = butter_lowpass_filter(neg_integration, cutoff_freq, fs, order=4)
+        
+        # TO 감지: 양의 이산 적분
+        pos_integration = discrete_integration(np.array(accel_z_data), dt)
+        filtered_pos = butter_lowpass_filter(pos_integration, cutoff_freq, fs, order=4)
+        
+        # 피크 감지 (prominence >= 0.1 m/s)
+        hs_peaks, _ = find_peaks(filtered_neg, prominence=0.1)
+        to_peaks, _ = find_peaks(filtered_pos, prominence=0.1)
+        
+        # 피크 인덱스를 시간으로 변환
+        hs_times = [time_data[i] for i in hs_peaks if i < len(time_data)]
+        to_times = [time_data[i] for i in to_peaks if i < len(time_data)]
+        
+        return hs_times, to_times
+        
+    except Exception as e:
+        print(f"Gait event detection error: {e}")
+        return [], []
+
+# Process gait events
+def process_gait_events(hs_times, to_times):
+    global hs_events, to_events
+    
+    with data_lock:
+        # 새로운 이벤트만 추가 (중복 방지)
+        current_time = time.time()
+        
+        for hs_time in hs_times:
+            if not any(abs(hs_time - existing[0]) < 0.1 for existing in hs_events):
+                hs_events.append([hs_time, "HS"])
+                gait_event_queue.append(("HS", hs_time))
+                add_gait_marker(hs_time, "HS")
+                print(f"HS detected at: {datetime.datetime.fromtimestamp(hs_time).strftime('%H:%M:%S.%f')[:-3]}")
+        
+        for to_time in to_times:
+            if not any(abs(to_time - existing[0]) < 0.1 for existing in to_events):
+                to_events.append([to_time, "TO"])
+                gait_event_queue.append(("TO", to_time))
+                add_gait_marker(to_time, "TO")
+                print(f"TO detected at: {datetime.datetime.fromtimestamp(to_time).strftime('%H:%M:%S.%f')[:-3]}")
+
+# Add gait marker to graph
+def add_gait_marker(timestamp, event_type):
+    if event_type == "HS":
+        line_pen = pg.mkPen(color=(0, 0, 255), width=2, style=QtCore.Qt.DashLine)  # 파란색
+        markers_list = hs_markers
+    else:  # TO
+        line_pen = pg.mkPen(color=(255, 165, 0), width=2, style=QtCore.Qt.DashLine)  # 주황색
+        markers_list = to_markers
+    
+    acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+    gyr_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+    
+    markers_list.append((acc_line, gyr_line))
+    plots['accel'].addItem(acc_line)
+    plots['gyro'].addItem(gyr_line)
 
 # Save received data to CSV
 def save_data():
-    global received_data, fall_events
+    global received_data, hs_events, to_events
     
     with data_lock:
         if received_data:
-            # Create filename with timestamp
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(DATA_FOLDER, f"imu_data_{timestamp}.csv")
+            filename = os.path.join(DATA_FOLDER, f"imu_gait_data_{timestamp}.csv")
             
-            # Save to CSV
+            # 메인 데이터 저장
             with open(filename, 'w') as f:
                 f.write("Time,AccX,AccY,AccZ,GyroX,GyroY,GyroZ\n")
                 for data in received_data:
                     f.write(f"{','.join(str(x) for x in data)}\n")
             
             print(f"Data saved: {filename} (Total: {len(received_data)} samples)")
-            received_data = []
-        
-        # 낙상 이벤트 저장
-        if fall_events:
-            with open(FALL_LOG_FILE, 'a') as f:
-                for event in fall_events:
-                    timestamp, prob = event
-                    date_time = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S.%f")
-                    f.write(f"{timestamp},{date_time},{prob}\n")
             
-            print(f"Fall events saved: {len(fall_events)} events to {FALL_LOG_FILE}")
-            fall_events = []
-
-# Process fall detection event
-def process_fall_event(event_data):
-    global fall_events
-    
-    timestamp = event_data['timestamp']
-    probability = event_data['probability']
-    
-    # 화면에 알림
-    print(f"\n{'*' * 30}")
-    print(f"낙상 감지! 시간: {datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M:%S.%f')}")
-    print(f"확률: {probability:.2%}")
-    print(f"{'*' * 30}\n")
-    
-    # 이벤트 저장
-    with data_lock:
-        fall_events.append([timestamp, probability])
-    
-    # 그래프에 마커 추가
-    add_fall_marker(timestamp)
-
-# Add fall marker to graph
-def add_fall_marker(timestamp):
-    global fall_markers, plots
-    
-    # 가속도 그래프에 세로선 추가
-    line_pen = pg.mkPen(color=(255, 0, 0), width=2, style=QtCore.Qt.DashLine)
-    acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-    gyr_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-    
-    # 텍스트 추가 (고정된 X,Y 위치에 표시)
-    time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')
-    
-    # 낙상 이벤트 정보 저장 (메인 스레드에서 UI 업데이트를 위해)
-    with data_lock:
-        # 시간 정보와 함께 낙상 이벤트 큐에 추가
-        fall_event_queue.append(time_str)
-    
-    # 그래프에는 선만 표시 (UI 요소는 아님)
-    fall_markers.append((acc_line, gyr_line))
-    plots['accel'].addItem(acc_line)
-    plots['gyro'].addItem(gyr_line)
+            # 보행 이벤트 저장
+            gait_filename = os.path.join(DATA_FOLDER, f"gait_events_{timestamp}.csv")
+            with open(gait_filename, 'w') as f:
+                f.write("Timestamp,Date_Time,Event_Type\n")
+                
+                # HS와 TO 이벤트를 시간순으로 정렬하여 저장
+                all_events = []
+                for event in hs_events:
+                    all_events.append((event[0], "HS"))
+                for event in to_events:
+                    all_events.append((event[0], "TO"))
+                
+                all_events.sort(key=lambda x: x[0])  # 시간순 정렬
+                
+                for timestamp_val, event_type in all_events:
+                    date_time = datetime.datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S.%f")
+                    f.write(f"{timestamp_val},{date_time},{event_type}\n")
+            
+            print(f"Gait events saved: {gait_filename} (HS: {len(hs_events)}, TO: {len(to_events)})")
+            
+            # 전역 로그 파일에도 저장
+            with open(GAIT_LOG_FILE, 'a') as f:
+                for timestamp_val, event_type in all_events:
+                    date_time = datetime.datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S.%f")
+                    f.write(f"{timestamp_val},{date_time},{event_type}\n")
+            
+            received_data = []
+            hs_events = []
+            to_events = []
 
 # Client connection handler
 def handle_client(client_socket, address):
     global received_data, time_buffer, accel_x_buffer, accel_y_buffer, accel_z_buffer, gyro_x_buffer, gyro_y_buffer, gyro_z_buffer, start_time
+    global accel_z_integration_buffer, time_integration_buffer
     
     print(f"Client connected: {address}")
     buffer = ""
@@ -190,28 +280,17 @@ def handle_client(client_socket, address):
             if not data:
                 break
                 
-            # Add to buffer
             buffer += data.decode('utf-8')
             
-            # Process complete JSON objects
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
                 
                 try:
-                    # Parse JSON
                     data_json = json.loads(line)
                     
-                    # 낙상 감지 이벤트인 경우
-                    if 'event' in data_json and data_json['event'] == 'fall_detected':
-                        process_fall_event(data_json)
-                        continue
-                    
-                    # 일반 센서 데이터인 경우
                     if 'accel' in data_json and 'gyro' in data_json:
-                        # Extract data
-                        # get_data.py에서 elapsed 시간을 보내므로 이를 실제 타임스탬프로 변환
                         elapsed_time = data_json['timestamp']
-                        timestamp = start_time + elapsed_time  # 실제 유닉스 타임스탬프로 변환
+                        timestamp = start_time + elapsed_time
                         
                         accel_x = data_json['accel']['x']
                         accel_y = data_json['accel']['y']
@@ -220,11 +299,9 @@ def handle_client(client_socket, address):
                         gyro_y = data_json['gyro']['y']
                         gyro_z = data_json['gyro']['z']
                         
-                        # Store data
                         with data_lock:
                             received_data.append([timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])
                             
-                            # Add to visualization buffers
                             time_buffer.append(timestamp)
                             accel_x_buffer.append(accel_x)
                             accel_y_buffer.append(accel_y)
@@ -232,6 +309,19 @@ def handle_client(client_socket, address):
                             gyro_x_buffer.append(gyro_x)
                             gyro_y_buffer.append(gyro_y)
                             gyro_z_buffer.append(gyro_z)
+                            
+                            # 이산 적분을 위한 데이터 저장
+                            accel_z_integration_buffer.append(accel_z)
+                            time_integration_buffer.append(timestamp)
+                            
+                            # 주기적으로 HS/TO 감지 수행 (50개 데이터마다)
+                            if len(accel_z_integration_buffer) % 50 == 0 and len(accel_z_integration_buffer) >= 100:
+                                hs_times, to_times = detect_gait_events(
+                                    list(accel_z_integration_buffer), 
+                                    list(time_integration_buffer)
+                                )
+                                if hs_times or to_times:
+                                    process_gait_events(hs_times, to_times)
                 
                 except json.JSONDecodeError as e:
                     print(f"JSON parsing error: {e}")
@@ -243,9 +333,9 @@ def handle_client(client_socket, address):
         client_socket.close()
         print(f"Client disconnected: {address}")
 
-# Update plot function (called by timer)
+# Update plot function
 def update_plots():
-    global fall_event_queue
+    global gait_event_queue
     
     with data_lock:
         t = list(time_buffer)
@@ -256,49 +346,38 @@ def update_plots():
         gy = list(gyro_y_buffer)
         gz = list(gyro_z_buffer)
         
-        # 낙상 이벤트 큐에서 이벤트 가져오기
-        local_fall_events = list(fall_event_queue)
-        fall_event_queue.clear()
+        local_gait_events = list(gait_event_queue)
+        gait_event_queue.clear()
     
-    # 낙상 이벤트가 있으면 UI 업데이트 (메인 스레드에서 수행)
-    if local_fall_events:
-        for time_str in local_fall_events:
-            # 낙상 이벤트 목록에 시간 추가
-            fall_label = plots['fall_list']
-            current_text = fall_label.text
-            new_text = current_text + f"\n• {time_str} - 낙상 감지됨"
-            fall_label.setText(new_text)
+    # 보행 이벤트 UI 업데이트
+    if local_gait_events:
+        for event_type, timestamp in local_gait_events:
+            gait_label = plots['gait_list']
+            current_text = gait_label.text
+            time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M:%S.%f')[:-3]
+            new_text = current_text + f"\n• {time_str} - {event_type} 감지됨"
+            gait_label.setText(new_text)
     
     if len(t) > 0:
-        # 시간 형식 변환 - 유닉스 타임스탬프를 시:분:초.밀리초 형식으로 변환
-        formatted_times = []
-        for timestamp in t:
-            dt = datetime.datetime.fromtimestamp(timestamp)
-            formatted_times.append(dt.strftime('%H:%M:%S.%f')[:-3])  # 밀리초까지만 표시
-        
-        # 데이터 업데이트
-        curves['accel_x'].setData(t, ax)  # X축은 원래 타임스탬프 유지 (내부 계산용)
+        curves['accel_x'].setData(t, ax)
         curves['accel_y'].setData(t, ay)
         curves['accel_z'].setData(t, az)
         curves['gyro_x'].setData(t, gx)
         curves['gyro_y'].setData(t, gy)
         curves['gyro_z'].setData(t, gz)
         
-        # 자동 X축 범위 조정
         if len(t) > 1:
-            x_min = max(min(t), t[-1] - 10)  # 최근 10초 데이터만 표시
-            x_max = t[-1] + 0.5  # 약간의 여백 추가
+            x_min = max(min(t), t[-1] - 10)
+            x_max = t[-1] + 0.5
             plots['accel'].setXRange(x_min, x_max, padding=0)
             
-        # X축 눈금 형식 설정 (보기 쉽게 시간으로 표시)
         def format_time_axis(x):
             try:
                 dt = datetime.datetime.fromtimestamp(x)
                 return dt.strftime('%H:%M:%S')
             except:
                 return ''
-            
-        # X축 눈금 형식 설정
+        
         plots['accel'].getAxis('bottom').setTicks([[(t[i], format_time_axis(t[i])) for i in range(0, len(t), len(t)//5) if i < len(t)]])
         plots['gyro'].getAxis('bottom').setTicks([[(t[i], format_time_axis(t[i])) for i in range(0, len(t), len(t)//5) if i < len(t)]])
 
@@ -310,7 +389,7 @@ def server_thread_func():
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((SERVER_IP, SERVER_PORT))
-        server_socket.settimeout(0.5)  # Set timeout
+        server_socket.settimeout(0.5)
         server_socket.listen(1)
         
         print(f"Server started: {SERVER_IP}:{SERVER_PORT}")
@@ -324,7 +403,6 @@ def server_thread_func():
             except socket.timeout:
                 continue
             except OSError:
-                # Socket closed - expected during shutdown
                 if is_running:
                     print("Server socket closed")
                 break
@@ -347,33 +425,23 @@ def server_thread_func():
 # Save graphs to image file
 def save_graphs():
     try:
-        # 타임스탬프로 파일명 생성
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(GRAPH_FOLDER, f"imu_graph_{timestamp}.png")
+        filename = os.path.join(GRAPH_FOLDER, f"gait_graph_{timestamp}.png")
         
-        # 화면에 출력된 그래프 영역 캡처
         exporter = pg.exporters.ImageExporter(win.centralWidget)
-        exporter.parameters()['width'] = 1000  # 이미지 너비 설정
+        exporter.parameters()['width'] = 1200
         exporter.export(filename)
         
         print(f"Graphs saved to image: {filename}")
     except Exception as e:
         print(f"Error saving graphs: {e}")
-        # 대안으로 전체 윈도우 캡처 시도
-        try:
-            exporter = pg.exporters.ImageExporter(win.scene())
-            exporter.export(filename)
-            print(f"Graphs saved using alternative method: {filename}")
-        except Exception as e2:
-            print(f"Alternative save method also failed: {e2}")
 
-# 키 입력 처리 클래스
+# Key press handling class
 class KeyPressWindow(pg.GraphicsLayoutWidget):
     def __init__(self, **kwargs):
         super(KeyPressWindow, self).__init__(**kwargs)
         
     def keyPressEvent(self, event):
-        # 'S' 키를 누르면 그래프 저장
         if event.key() == QtCore.Qt.Key_S:
             save_graphs()
             print("Screenshot taken (pressed S key)")
@@ -387,15 +455,12 @@ def handle_exit():
     print("\nExit requested - cleaning up...")
     is_running = False
     
-    # Save data
     print("Saving data...")
     save_data()
     
-    # Save graphs
     print("Saving graphs...")
     save_graphs()
     
-    # Close socket
     if server_socket:
         try:
             server_socket.close()
@@ -417,94 +482,83 @@ def signal_handler(signum, frame):
 def main():
     global app, win, plots, curves, is_running, start_time
     
-    # Signal handler 등록
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # 프로그램 시작 시간 기록
     start_time = time.time()
     
-    # Create folder
     create_data_folder()
     
-    # Setup PyQtGraph
     app = QtWidgets.QApplication([])
     
-    # 밝은 배경 테마 설정
-    pg.setConfigOption('background', 'w')  # 배경색을 흰색으로 설정
-    pg.setConfigOption('foreground', 'k')  # 전경색을 검은색으로 설정
+    pg.setConfigOption('background', 'w')
+    pg.setConfigOption('foreground', 'k')
     
-    # Create window with key press handling
-    win = KeyPressWindow(show=True, title="IMU Data Monitoring with Fall Detection")
-    win.resize(1000, 700)
+    win = KeyPressWindow(show=True, title="IMU Gait Analysis with HS/TO Detection")
+    win.resize(1200, 800)
     
-    # 낙상 이벤트 리스트를 표시할 레이블 추가
-    plots['fall_list'] = pg.LabelItem(text="낙상 감지 기록:", color='#aa0000')
-    win.addItem(plots['fall_list'], row=0, col=1, rowspan=2)
+    # 보행 이벤트 리스트 표시
+    plots['gait_list'] = pg.LabelItem(text="보행 이벤트 기록:\n• HS: Heel Strike (발뒤꿈치 착지)\n• TO: Toe Off (발가락 떼기)", color='#0000aa')
+    win.addItem(plots['gait_list'], row=0, col=1, rowspan=2)
     
-    # 단축키 안내 추가 (텍스트 색상 검은색으로 변경)
+    # 범례 추가
+    legend_label = pg.LabelItem(text="마커 범례:\n• 파란색 세로선: HS 이벤트\n• 주황색 세로선: TO 이벤트", color='#aa0000')
+    win.addItem(legend_label, row=2, col=1)
+    
+    # 단축키 안내
     shortcut_label = pg.LabelItem(text="Press 'S' to save graphs as image, Ctrl+C to exit", color='#000000')
     win.addItem(shortcut_label, row=3, col=0)
     
-    # 낙상 감지 상태 레이블 추가 (텍스트 색상 유지)
-    fall_status_label = pg.LabelItem(text="Fall Detection Status: Monitoring", color='#00aa00')
-    win.addItem(fall_status_label, row=2, col=0)
+    # 상태 레이블
+    status_label = pg.LabelItem(text="Gait Analysis Status: Monitoring", color='#00aa00')
+    win.addItem(status_label, row=2, col=0)
     
-    # Connect exit handler
     app.aboutToQuit.connect(handle_exit)
     
-    # Accelerometer graph
+    # 가속도 그래프
     plots['accel'] = win.addPlot(row=0, col=0)
     plots['accel'].setTitle("Acceleration (g)")
     plots['accel'].setLabel('left', "Acceleration", "g")
-    plots['accel'].setLabel('bottom', "Time", "")  # 단위 제거
+    plots['accel'].setLabel('bottom', "Time", "")
     plots['accel'].addLegend()
     plots['accel'].showGrid(x=True, y=True)
-    plots['accel'].setYRange(-1, 1)  # 가속도 그래프 Y축 고정 (-1g ~ +1g)
-    plots['accel'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
+    plots['accel'].setYRange(-2, 2)
+    plots['accel'].disableAutoRange(axis=pg.ViewBox.YAxis)
     
-    # 시간 축 형식 설정 (추가)
-    plots['accel'].getAxis('bottom').setStyle(tickTextOffset=15)  # 시간 레이블과 축 사이 간격 늘림
-    
-    # Gyroscope graph
+    # 자이로스코프 그래프
     win.nextRow()
     plots['gyro'] = win.addPlot(row=1, col=0)
     plots['gyro'].setTitle("Gyroscope (°/s)")
     plots['gyro'].setLabel('left', "Angular Velocity", "°/s")
-    plots['gyro'].setLabel('bottom', "Time", "")  # 단위 제거
+    plots['gyro'].setLabel('bottom', "Time", "")
     plots['gyro'].addLegend()
     plots['gyro'].showGrid(x=True, y=True)
-    plots['gyro'].setYRange(-125, 125)  # 자이로스코프 그래프 Y축 고정 (-125°/s ~ +125°/s)
-    plots['gyro'].disableAutoRange(axis=pg.ViewBox.YAxis)  # Y축 자동 스케일링 비활성화
+    plots['gyro'].setYRange(-250, 250)
+    plots['gyro'].disableAutoRange(axis=pg.ViewBox.YAxis)
     
-    # 시간 축 형식 설정 (추가)
-    plots['gyro'].getAxis('bottom').setStyle(tickTextOffset=15)  # 시간 레이블과 축 사이 간격 늘림
-    
-    # Link X axes for simultaneous scrolling
     plots['gyro'].setXLink(plots['accel'])
     
-    # Create data curves
+    # 데이터 곡선 생성
     curves['accel_x'] = plots['accel'].plot(pen=(255,0,0), name="X-axis")
     curves['accel_y'] = plots['accel'].plot(pen=(0,150,0), name="Y-axis")
-    curves['accel_z'] = plots['accel'].plot(pen=(0,0,255), name="Z-axis")
+    curves['accel_z'] = plots['accel'].plot(pen=(0,0,255), name="Z-axis (Vertical)")
     
     curves['gyro_x'] = plots['gyro'].plot(pen=(255,0,0), name="X-axis")
     curves['gyro_y'] = plots['gyro'].plot(pen=(0,150,0), name="Y-axis")
     curves['gyro_z'] = plots['gyro'].plot(pen=(0,0,255), name="Z-axis")
     
-    # Update timer
+    # 업데이트 타이머
     timer = QtCore.QTimer()
     timer.timeout.connect(update_plots)
-    timer.start(50)  # Update every 50ms
+    timer.start(50)
     
-    # Start server thread
+    # 서버 스레드 시작
     is_running = True
     server_thread = threading.Thread(target=server_thread_func)
     server_thread.daemon = True
     server_thread.start()
     
-    # Start GUI event loop
-    print("IMU Data Reception and Fall Detection Visualization Started")
+    print("IMU Gait Analysis with HS/TO Detection Started")
     print("Press Ctrl+C to stop and save data")
     
     try:
@@ -522,6 +576,5 @@ if __name__ == "__main__":
         print(f"Unexpected error: {e}")
         handle_exit()
     finally:
-        # Final cleanup
         is_running = False
         save_data() 
