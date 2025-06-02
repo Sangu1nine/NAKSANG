@@ -304,7 +304,7 @@ class GaitEventDetector:
                 # 이미 감지된 이벤트인지 확인
                 if not any(abs(event[0] - peak_time) < 0.05 for event in self.to_events):
                     self.to_events.append((peak_time, peak_value))
-                    self._debug_print(f"TO 감지: 시간={peak_time:.3f}s, 값={peak_value:.3f}")
+                    self._debug_print(f"TO 감지: 시간={peak_time:.2f}초, 값={peak_value:.3f}")
         
         # HS 감지 (음의 적분)
         neg_data = np.array(list(self.integration_negative)[-window_size:])
@@ -324,7 +324,7 @@ class GaitEventDetector:
                 # 이미 감지된 이벤트인지 확인
                 if not any(abs(event[0] - peak_time) < 0.05 for event in self.hs_events):
                     self.hs_events.append((peak_time, peak_value))
-                    self._debug_print(f"HS 감지: 시간={peak_time:.3f}s, 값={peak_value:.3f}")
+                    self._debug_print(f"HS 감지: 시간={peak_time:.2f}초, 값={peak_value:.3f}")
     
     def _apply_butterworth_filter(self, data):
         """버터워스 필터 적용"""
@@ -418,9 +418,6 @@ class MainWindow(QMainWindow):
         # 상태 변수
         self.is_recording = False
         self.start_time = None
-        
-        # 시작 시간 기록
-        self.app_start_time = time.time()
         
     def setup_ui(self):
         """UI 구성"""
@@ -538,7 +535,7 @@ class MainWindow(QMainWindow):
         # 가속도 그래프
         self.acc_plot = pg.PlotWidget(title="수직 가속도 (acc_y)")
         self.acc_plot.setLabel('left', '가속도', units='m/s²')
-        self.acc_plot.setLabel('bottom', '시간', units='s')
+        self.acc_plot.setLabel('bottom', '경과 시간', units='초')
         self.acc_plot.showGrid(True, True)
         
         self.acc_curve = self.acc_plot.plot(pen=colors['acc_y'], name='원본 acc_y')
@@ -551,7 +548,7 @@ class MainWindow(QMainWindow):
         # 적분 그래프
         self.integral_plot = pg.PlotWidget(title="적분값 및 필터링된 신호")
         self.integral_plot.setLabel('left', '적분값', units='m/s')
-        self.integral_plot.setLabel('bottom', '시간', units='s')
+        self.integral_plot.setLabel('bottom', '경과 시간', units='초')
         self.integral_plot.showGrid(True, True)
         
         self.pos_integral_curve = self.integral_plot.plot(pen=colors['pos_integral'], name='양의 적분 (TO)')
@@ -625,7 +622,6 @@ class MainWindow(QMainWindow):
         self.is_recording = not self.is_recording
         if self.is_recording:
             self.record_btn.setText("기록 중지")
-            self.start_time = time.time()
             self.gait_detector = GaitEventDetector()  # 리셋
             self.clear_data()
         else:
@@ -634,20 +630,20 @@ class MainWindow(QMainWindow):
     def on_data_received(self, data):
         """데이터 수신 처리"""
         try:
-            # 절대 시간으로 변환 (get_data.py와 동일한 방식)
+            # 상대적 시간으로 변환 (앱 시작 시점부터의 경과 시간)
             elapsed_time = data.get('timestamp', 0)
-            absolute_timestamp = self.app_start_time + elapsed_time
+            relative_timestamp = elapsed_time  # 이미 경과 시간이므로 그대로 사용
             
             target_axis = SENSOR_CONFIG['target_axis']
             acc_target = data['accel'][target_axis]  # 설정된 축의 가속도
             
             # 데이터 버퍼에 추가
-            self.time_data.append(absolute_timestamp)
+            self.time_data.append(relative_timestamp)
             self.acc_y_data.append(acc_target)
             
             # 기록 중일 때만 보행 이벤트 감지
             if self.is_recording:
-                self.gait_detector.add_data(absolute_timestamp, acc_target)
+                self.gait_detector.add_data(relative_timestamp, acc_target)
             
         except KeyError as e:
             self.log_message(f"데이터 형식 오류: {e}")

@@ -25,7 +25,7 @@ SENSOR_CONFIG = {
 SIGNAL_PROCESSING = {
     # 버터워스 필터 설정
     'filter': {
-        'cutoff_frequency_rad': 0.08,  # 차단 주파수 (rad)
+        'cutoff_frequency_rad': 12,  # 차단 주파수 (rad)
         'filter_order': 4,             # 필터 차수
         'type': 'low'                  # 필터 타입 ('low', 'high', 'band')
     },
