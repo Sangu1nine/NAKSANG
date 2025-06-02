@@ -9,8 +9,8 @@ SERVER_PORT = 5000
 
 def generate_test_data(timestamp):
     """보행 패턴을 시뮬레이션하는 테스트 데이터 생성"""
-    # 보행 주기: 약 1.2초 (0.83Hz)
-    gait_freq = 0.83
+    # 보행 주기: 약 2초 (0.5Hz) - 더 느리게 변경
+    gait_freq = 0.5
     
     # 기본 가속도 (중력 포함) - y축이 수직
     base_accel_y = 9.8  # 중력 가속도
@@ -18,16 +18,20 @@ def generate_test_data(timestamp):
     # 보행 시뮬레이션: 발뒤꿈치 착지와 발가락 떼기 패턴
     gait_phase = (timestamp * gait_freq) % 1.0
     
-    if 0.0 <= gait_phase < 0.1:  # Heel Strike 구간
-        accel_y = base_accel_y + 15 * math.sin(gait_phase * 20 * math.pi)
-    elif 0.6 <= gait_phase < 0.7:  # Toe Off 구간  
-        accel_y = base_accel_y - 10 * math.sin((gait_phase - 0.6) * 20 * math.pi)
+    if 0.0 <= gait_phase < 0.15:  # Heel Strike 구간 (더 길게)
+        # 더 강한 충격
+        phase_progress = gait_phase / 0.15
+        accel_y = base_accel_y + 20 * math.sin(phase_progress * math.pi)
+    elif 0.6 <= gait_phase < 0.75:  # Toe Off 구간 (더 길게)
+        # 더 강한 음의 가속도
+        phase_progress = (gait_phase - 0.6) / 0.15
+        accel_y = base_accel_y - 15 * math.sin(phase_progress * math.pi)
     else:  # 평상시
-        accel_y = base_accel_y + 2 * math.sin(timestamp * 4 * math.pi)  # 작은 진동
+        accel_y = base_accel_y + 1 * math.sin(timestamp * 2 * math.pi)  # 더 작은 진동
     
     # X, Z축은 작은 변동
-    accel_x = 0.5 * math.sin(timestamp * 3 * math.pi)
-    accel_z = 0.3 * math.cos(timestamp * 2.5 * math.pi)
+    accel_x = 0.3 * math.sin(timestamp * 1.5 * math.pi)
+    accel_z = 0.2 * math.cos(timestamp * 1.2 * math.pi)
     
     return {
         'timestamp': timestamp,

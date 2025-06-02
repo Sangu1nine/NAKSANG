@@ -82,7 +82,7 @@ accel_y_buffer = deque(maxlen=buffer_size)
 accel_z_buffer = deque(maxlen=buffer_size)
 
 # 이산 적분용 버퍼
-integration_buffer_size = 50  # 500에서 50으로 변경
+integration_buffer_size = 100  # 50에서 100으로 증가
 accel_y_integration_buffer = deque(maxlen=integration_buffer_size)
 time_integration_buffer = deque(maxlen=integration_buffer_size)
 
@@ -111,6 +111,17 @@ plots = {}
 curves = {}
 hs_markers = []  # HS 이벤트 마커 저장
 to_markers = []  # TO 이벤트 마커 저장
+
+# 사람이 읽기 쉬운 시간 변환 함수
+def convert_to_readable_time(timestamp):
+    """Unix timestamp를 프로그램 시작 시점부터의 경과 시간(초)으로 변환"""
+    return timestamp - start_time
+
+def format_readable_time(elapsed_seconds):
+    """경과 시간을 MM:SS.mmm 형태로 포맷"""
+    minutes = int(elapsed_seconds // 60)
+    seconds = elapsed_seconds % 60
+    return f"{minutes:02d}:{seconds:06.3f}"
 
 # Create data folder
 def create_data_folder():
@@ -173,8 +184,12 @@ def calculate_integration_values(accel_y_data, time_data):
     fs = 1.0 / dt if dt > 0 else 100
     
     try:
-        # 중력 성분 제거 (고역통과 필터 적용)
+        # 중력 성분 제거
         gravity_removed_accel = remove_gravity_component(accel_y_data)
+        
+        # 디버깅 출력 (가끔씩만)
+        if len(accel_y_data) % 20 == 0:  # 20번에 한 번만 출력
+            print(f"Integration Debug - Gravity removed accel: [{min(gravity_removed_accel):.2f}, {max(gravity_removed_accel):.2f}]")
         
         # 중력 제거된 가속도로 이산 적분 수행
         neg_integration = discrete_integration(-np.array(gravity_removed_accel), dt)
@@ -187,6 +202,7 @@ def calculate_integration_values(accel_y_data, time_data):
             return 0, 0, 0, 0
         
     except Exception as e:
+        print(f"Integration calculation error: {e}")
         return 0, 0, 0, 0
 
 # HS/TO detection function
@@ -199,12 +215,15 @@ def detect_gait_events(accel_y_data, time_data):
     dt = np.mean(np.diff(time_data)) if len(time_data) > 1 else 0.01
     fs = 1.0 / dt if dt > 0 else 100
     
-    # 차단 주파수 설정 (ω=0.08 rad를 Hz로 변환)
-    cutoff_freq = 0.08 / (2 * np.pi)  # rad/s to Hz
+    # 차단 주파수 설정 (보행 주파수에 맞게 대폭 상향 조정)
+    cutoff_freq = 2.0  # 1.0에서 2.0 Hz로 변경
     
     try:
         # 중력 성분 제거
         gravity_removed_accel = remove_gravity_component(accel_y_data)
+        
+        print(f"Debug - Original accel_y range: [{min(accel_y_data):.2f}, {max(accel_y_data):.2f}]")
+        print(f"Debug - Gravity removed range: [{min(gravity_removed_accel):.2f}, {max(gravity_removed_accel):.2f}]")
         
         # HS 감지: 음의 이산 적분 (중력 제거된 가속도 사용)
         neg_integration = discrete_integration(-np.array(gravity_removed_accel), dt)
@@ -214,13 +233,46 @@ def detect_gait_events(accel_y_data, time_data):
         pos_integration = discrete_integration(np.array(gravity_removed_accel), dt)
         filtered_pos = butter_lowpass_filter(pos_integration, cutoff_freq, fs, order=4)
         
-        # 피크 감지 (prominence >= 0.1 m/s)
-        hs_peaks, _ = find_peaks(filtered_neg, prominence=0.1)
-        to_peaks, _ = find_peaks(filtered_pos, prominence=0.1)
+        print(f"Debug - Neg integration range: [{min(neg_integration):.4f}, {max(neg_integration):.4f}]")
+        print(f"Debug - Pos integration range: [{min(pos_integration):.4f}, {max(pos_integration):.4f}]")
+        print(f"Debug - Filtered neg range: [{min(filtered_neg):.4f}, {max(filtered_neg):.4f}]")
+        print(f"Debug - Filtered pos range: [{min(filtered_pos):.4f}, {max(filtered_pos):.4f}]")
+        
+        # 피크 감지 (prominence >= 0.1 m/s에서 더 낮춤)
+        prominence_threshold = 0.1  # 0.05에서 0.1로 증가 (더 엄격한 감지)
+        hs_peaks, hs_properties = find_peaks(filtered_neg, prominence=prominence_threshold)
+        to_peaks, to_properties = find_peaks(filtered_pos, prominence=prominence_threshold)
+        
+        print(f"Debug - Found {len(hs_peaks)} HS peaks, {len(to_peaks)} TO peaks")
+        if len(hs_peaks) > 0:
+            print(f"Debug - HS peak prominences: {hs_properties['prominences']}")
+            print(f"Debug - HS peak indices: {hs_peaks}")
+            print(f"Debug - time_data length: {len(time_data)}")
+            print(f"Debug - time_data range: [{format_readable_time(time_data[0])}, {format_readable_time(time_data[-1])}]")
+        if len(to_peaks) > 0:
+            print(f"Debug - TO peak prominences: {to_properties['prominences']}")
+            print(f"Debug - TO peak indices: {to_peaks}")
         
         # 피크 인덱스를 시간으로 변환
-        hs_times = [time_data[i] for i in hs_peaks if i < len(time_data)]
-        to_times = [time_data[i] for i in to_peaks if i < len(time_data)]
+        hs_times = []
+        for i, peak_idx in enumerate(hs_peaks):
+            if peak_idx < len(time_data):
+                hs_time = time_data[peak_idx]
+                hs_times.append(hs_time)
+                print(f"Debug - HS peak {i}: index {peak_idx} -> time {format_readable_time(hs_time)}")
+            else:
+                print(f"Debug - HS peak {i}: index {peak_idx} out of range (max: {len(time_data)-1})")
+        
+        to_times = []
+        for i, peak_idx in enumerate(to_peaks):
+            if peak_idx < len(time_data):
+                to_time = time_data[peak_idx]
+                to_times.append(to_time)
+                print(f"Debug - TO peak {i}: index {peak_idx} -> time {format_readable_time(to_time)}")
+            else:
+                print(f"Debug - TO peak {i}: index {peak_idx} out of range (max: {len(time_data)-1})")
+        
+        print(f"Debug - Final HS times: {len(hs_times)}, TO times: {len(to_times)}")
         
         return hs_times, to_times
         
@@ -232,50 +284,119 @@ def detect_gait_events(accel_y_data, time_data):
 def process_gait_events(hs_times, to_times):
     global hs_events, to_events
     
-    with data_lock:
-        # 새로운 이벤트만 추가 (중복 방지)
-        current_time = time.time()
+    try:
+        print(f"DEBUG - Processing gait events: {len(hs_times)} HS, {len(to_times)} TO")
         
-        for hs_time in hs_times:
-            if not any(abs(hs_time - existing[0]) < 0.1 for existing in hs_events):
-                hs_events.append([hs_time, "HS"])
-                gait_event_queue.append(("HS", hs_time))
-                add_gait_marker(hs_time, "HS")
-                print(f"HS detected at: {datetime.datetime.fromtimestamp(hs_time).strftime('%H:%M:%S.%f')[:-3]}")
-        
-        for to_time in to_times:
-            if not any(abs(to_time - existing[0]) < 0.1 for existing in to_events):
-                to_events.append([to_time, "TO"])
-                gait_event_queue.append(("TO", to_time))
-                add_gait_marker(to_time, "TO")
-                print(f"TO detected at: {datetime.datetime.fromtimestamp(to_time).strftime('%H:%M:%S.%f')[:-3]}")
+        with data_lock:
+            # 새로운 이벤트만 추가 (중복 방지)
+            current_time = time.time()
+            
+            for hs_time in hs_times:
+                try:
+                    # 중복 확인 (0.1초 이내 중복 방지)
+                    if not any(abs(hs_time - existing[0]) < 0.1 for existing in hs_events):
+                        hs_events.append([hs_time, "HS"])
+                        gait_event_queue.append(("HS", hs_time))
+                        print(f"NEW HS EVENT - Time: {format_readable_time(hs_time)}")
+                        
+                        # 마커 추가를 별도로 시도 (UI 에러 방지)
+                        try:
+                            # 실제 timestamp (start_time 기준)로 변환하여 마커 추가
+                            actual_timestamp = start_time + hs_time
+                            add_gait_marker(hs_time, "HS")  # 그래프용 시간으로 마커 추가
+                            print(f"DEBUG - HS marker addition attempted for time {format_readable_time(hs_time)}")
+                        except Exception as marker_error:
+                            print(f"WARNING - HS marker addition failed (non-critical): {marker_error}")
+                    else:
+                        print(f"DEBUG - Duplicate HS event ignored at time {format_readable_time(hs_time)}")
+                except Exception as hs_error:
+                    print(f"ERROR - HS processing error: {hs_error}")
+            
+            for to_time in to_times:
+                try:
+                    # 중복 확인 (0.1초 이내 중복 방지)
+                    if not any(abs(to_time - existing[0]) < 0.1 for existing in to_events):
+                        to_events.append([to_time, "TO"])
+                        gait_event_queue.append(("TO", to_time))
+                        print(f"NEW TO EVENT - Time: {format_readable_time(to_time)}")
+                        
+                        # 마커 추가를 별도로 시도 (UI 에러 방지)
+                        try:
+                            # 실제 timestamp (start_time 기준)로 변환하여 마커 추가
+                            actual_timestamp = start_time + to_time
+                            add_gait_marker(to_time, "TO")  # 그래프용 시간으로 마커 추가
+                            print(f"DEBUG - TO marker addition attempted for time {format_readable_time(to_time)}")
+                        except Exception as marker_error:
+                            print(f"WARNING - TO marker addition failed (non-critical): {marker_error}")
+                    else:
+                        print(f"DEBUG - Duplicate TO event ignored at time {format_readable_time(to_time)}")
+                except Exception as to_error:
+                    print(f"ERROR - TO processing error: {to_error}")
+                    
+        print(f"DEBUG - Event processing completed. Total events: HS={len(hs_events)}, TO={len(to_events)}")
+                    
+    except Exception as e:
+        print(f"CRITICAL ERROR - Process gait events error: {e}")
 
 # Add gait marker to graph
 def add_gait_marker(timestamp, event_type):
     try:
+        print(f"DEBUG - Attempting to add {event_type} marker at time {format_readable_time(timestamp)}")
+        
         # plots가 초기화되지 않은 경우 무시
-        if 'accel' not in plots or 'integration' not in plots:
-            print(f"Plots not initialized yet, skipping marker for {event_type}")
+        if not plots or 'accel' not in plots or 'integration' not in plots:
+            print(f"DEBUG - Plots not initialized yet, skipping marker for {event_type}")
             return
             
+        # plots 객체가 None인지 확인
+        if plots['accel'] is None or plots['integration'] is None:
+            print(f"DEBUG - Plot objects are None, skipping marker for {event_type}")
+            return
+        
+        print(f"DEBUG - Plots are ready, creating {event_type} marker")
+            
         if event_type == "HS":
-            line_pen = pg.mkPen(color=(0, 0, 255), width=2, style=QtCore.Qt.DashLine)  # 파란색
+            line_pen = pg.mkPen(color=(0, 0, 255), width=3, style=QtCore.Qt.DashLine)  # 파란색, 더 굵게
             markers_list = hs_markers
         else:  # TO
-            line_pen = pg.mkPen(color=(255, 165, 0), width=2, style=QtCore.Qt.DashLine)  # 주황색
+            line_pen = pg.mkPen(color=(255, 165, 0), width=3, style=QtCore.Qt.DashLine)  # 주황색, 더 굵게
             markers_list = to_markers
         
-        acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-        int_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
-        
-        markers_list.append((acc_line, int_line))
-        plots['accel'].addItem(acc_line)
-        plots['integration'].addItem(int_line)
-        
-        print(f"Added {event_type} marker at timestamp: {timestamp}")
+        # 마커 생성 시도
+        try:
+            acc_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+            int_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=line_pen, movable=False)
+            print(f"DEBUG - Created {event_type} line objects successfully")
+            
+            # 그래프에 추가 시도
+            try:
+                plots['accel'].addItem(acc_line)
+                plots['integration'].addItem(int_line)
+                print(f"DEBUG - Added {event_type} lines to plots successfully")
+                
+                # 성공적으로 추가된 경우에만 리스트에 저장
+                markers_list.append((acc_line, int_line))
+                print(f"SUCCESS - {event_type} marker added at timestamp: {format_readable_time(timestamp)}")
+                
+                # 마커 개수 확인
+                total_hs = len(hs_markers)
+                total_to = len(to_markers)
+                print(f"DEBUG - Total markers: HS={total_hs}, TO={total_to}")
+                
+            except Exception as add_error:
+                print(f"ERROR - Failed to add {event_type} marker to plots: {add_error}")
+                # 마커 객체 정리
+                try:
+                    del acc_line, int_line
+                except:
+                    pass
+                
+        except Exception as create_error:
+            print(f"ERROR - Failed to create {event_type} marker objects: {create_error}")
         
     except Exception as e:
-        print(f"Error adding marker for {event_type}: {e}")
+        print(f"CRITICAL ERROR - add_marker for {event_type}: {e}")
+        # 절대 실패하지 않도록 예외를 삼킨다
 
 # Save received data to CSV
 def save_data():
@@ -360,14 +481,16 @@ def handle_client(client_socket, address):
                             # 가속도 데이터만 저장
                             received_data.append([timestamp, accel_x, accel_y, accel_z])
                             
-                            time_buffer.append(timestamp)
+                            # 그래프용으로 읽기 쉬운 시간으로 변환하여 저장
+                            readable_time = convert_to_readable_time(timestamp)
+                            time_buffer.append(readable_time)
                             accel_x_buffer.append(accel_x)
                             accel_y_buffer.append(accel_y)
                             accel_z_buffer.append(accel_z)
                             
                             # 이산 적분을 위한 데이터 저장 (Y축이 수직 가속도)
                             accel_y_integration_buffer.append(accel_y)
-                            time_integration_buffer.append(timestamp)
+                            time_integration_buffer.append(readable_time)  # 읽기 쉬운 시간 사용
                             
                             # 적분값 계산 (5개 데이터마다만 수행 - 10에서 5로 변경)
                             if len(accel_y_integration_buffer) % 5 == 0 and len(accel_y_integration_buffer) >= 5:
@@ -400,19 +523,23 @@ def handle_client(client_socket, address):
                                     neg_filtered_buffer.append(0)
                                     pos_filtered_buffer.append(0)
                             
-                            # 주기적으로 HS/TO 감지 수행 (10개 데이터마다로 변경 - 200에서 10으로)
-                            if len(accel_y_integration_buffer) % 10 == 0 and len(accel_y_integration_buffer) >= 15:
+                            # 주기적으로 HS/TO 감지 수행 (5개 데이터마다로 변경)
+                            if len(accel_y_integration_buffer) % 5 == 0 and len(accel_y_integration_buffer) >= 20:
                                 # 별도 스레드에서 실행하지 않고 직접 실행 (간단하게)
                                 try:
-                                    hs_times, to_times = detect_gait_events(
-                                        list(accel_y_integration_buffer)[-20:],  # 200에서 20으로 변경
-                                        list(time_integration_buffer)[-20:]
-                                    )
-                                    if hs_times or to_times:
-                                        # process_gait_events 함수를 사용하여 마커 추가
-                                        process_gait_events(hs_times, to_times)
-                                except:
-                                    pass  # 에러 무시
+                                    # 시각화용 적분값 버퍼를 그대로 사용 (계산 일치성 보장)
+                                    if len(neg_integration_buffer) >= 40 and len(pos_integration_buffer) >= 40:
+                                        # 시각화와 동일한 데이터로 감지 수행
+                                        hs_times, to_times = detect_gait_events_from_buffers(
+                                            list(neg_integration_buffer)[-40:],  # 시각화용 음의 적분값
+                                            list(pos_integration_buffer)[-40:],  # 시각화용 양의 적분값  
+                                            list(time_buffer)[-40:]              # 대응하는 시간값
+                                        )
+                                        if hs_times or to_times:
+                                            # process_gait_events 함수를 사용하여 마커 추가
+                                            process_gait_events(hs_times, to_times)
+                                except Exception as e:
+                                    print(f"Gait detection error: {e}")  # 에러도 출력
                 
                 except json.JSONDecodeError as e:
                     print(f"JSON parsing error: {e}")
@@ -450,7 +577,7 @@ def update_plots():
                 try:
                     gait_label = plots['gait_list']
                     current_text = gait_label.text
-                    time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M:%S.%f')[:-3]
+                    time_str = format_readable_time(timestamp)
                     new_text = current_text + f"\n• {time_str} - {event_type} 감지됨"
                     gait_label.setText(new_text)
                 except:
@@ -600,6 +727,80 @@ def signal_handler(signum, frame):
         app.quit()
     sys.exit(0)
 
+# 시각화 버퍼를 직접 사용하는 새로운 감지 함수
+def detect_gait_events_from_buffers(neg_integration_data, pos_integration_data, time_data):
+    """시각화용 적분값 버퍼를 직접 사용한 HS/TO 감지"""
+    if len(neg_integration_data) < 10 or len(pos_integration_data) < 10:
+        return [], []
+    
+    # 샘플링 주파수 계산
+    dt = np.mean(np.diff(time_data)) if len(time_data) > 1 else 0.01
+    fs = 1.0 / dt if dt > 0 else 100
+    
+    # 차단 주파수 설정 (보행 주파수에 맞게 대폭 상향 조정)
+    cutoff_freq = 2.0  # 1.0에서 2.0 Hz로 변경
+    
+    try:
+        print(f"Debug - Using visualization buffers for detection")
+        print(f"Debug - Sampling frequency: {fs:.2f} Hz, Cutoff frequency: {cutoff_freq} Hz")
+        print(f"Debug - Neg integration range: [{min(neg_integration_data):.4f}, {max(neg_integration_data):.4f}]")
+        print(f"Debug - Pos integration range: [{min(pos_integration_data):.4f}, {max(pos_integration_data):.4f}]")
+        
+        # 버터워스 필터링 (시각화 데이터에 적용) - 차단주파수가 샘플링 주파수보다 낮은지 확인
+        if cutoff_freq < fs / 2:
+            filtered_neg = butter_lowpass_filter(neg_integration_data, cutoff_freq, fs, order=4)
+            filtered_pos = butter_lowpass_filter(pos_integration_data, cutoff_freq, fs, order=4)
+        else:
+            # 차단주파수가 너무 높으면 필터링 없이 사용
+            filtered_neg = np.array(neg_integration_data)
+            filtered_pos = np.array(pos_integration_data)
+            print(f"Debug - Skipping filter (cutoff {cutoff_freq} >= Nyquist {fs/2})")
+        
+        print(f"Debug - Filtered neg range: [{min(filtered_neg):.4f}, {max(filtered_neg):.4f}]")
+        print(f"Debug - Filtered pos range: [{min(filtered_pos):.4f}, {max(filtered_pos):.4f}]")
+        
+        # 피크 감지 (prominence >= 0.1 m/s에서 더 낮춤)
+        prominence_threshold = 0.1  # 0.05에서 0.1로 증가 (더 엄격한 감지)
+        hs_peaks, hs_properties = find_peaks(filtered_neg, prominence=prominence_threshold)
+        to_peaks, to_properties = find_peaks(filtered_pos, prominence=prominence_threshold)
+        
+        print(f"Debug - Found {len(hs_peaks)} HS peaks, {len(to_peaks)} TO peaks")
+        if len(hs_peaks) > 0:
+            print(f"Debug - HS peak prominences: {hs_properties['prominences']}")
+            print(f"Debug - HS peak indices: {hs_peaks}")
+            print(f"Debug - time_data length: {len(time_data)}")
+            print(f"Debug - time_data range: [{format_readable_time(time_data[0])}, {format_readable_time(time_data[-1])}]")
+        if len(to_peaks) > 0:
+            print(f"Debug - TO peak prominences: {to_properties['prominences']}")
+            print(f"Debug - TO peak indices: {to_peaks}")
+        
+        # 피크 인덱스를 시간으로 변환
+        hs_times = []
+        for i, peak_idx in enumerate(hs_peaks):
+            if peak_idx < len(time_data):
+                hs_time = time_data[peak_idx]
+                hs_times.append(hs_time)
+                print(f"Debug - HS peak {i}: index {peak_idx} -> time {format_readable_time(hs_time)}")
+            else:
+                print(f"Debug - HS peak {i}: index {peak_idx} out of range (max: {len(time_data)-1})")
+        
+        to_times = []
+        for i, peak_idx in enumerate(to_peaks):
+            if peak_idx < len(time_data):
+                to_time = time_data[peak_idx]
+                to_times.append(to_time)
+                print(f"Debug - TO peak {i}: index {peak_idx} -> time {format_readable_time(to_time)}")
+            else:
+                print(f"Debug - TO peak {i}: index {peak_idx} out of range (max: {len(time_data)-1})")
+        
+        print(f"Debug - Final HS times: {len(hs_times)}, TO times: {len(to_times)}")
+        
+        return hs_times, to_times
+        
+    except Exception as e:
+        print(f"Gait event detection error: {e}")
+        return [], []
+
 # Main function
 def main():
     global app, win, plots, curves, is_running, start_time
@@ -641,7 +842,7 @@ def main():
     plots['accel'] = win.addPlot(row=0, col=0)
     plots['accel'].setTitle("Acceleration (m/s²)")
     plots['accel'].setLabel('left', "Acceleration", "m/s²")
-    plots['accel'].setLabel('bottom', "Time", "")
+    plots['accel'].setLabel('bottom', "Time", "MM:SS.mmm")  # 시간 형식 표시
     plots['accel'].addLegend()
     plots['accel'].showGrid(x=True, y=True)
     plots['accel'].setYRange(-20, 20)  # m/s² 단위에 맞게 조정 (±2g ≈ ±20m/s²)
@@ -652,7 +853,7 @@ def main():
     plots['integration'] = win.addPlot(row=1, col=0)
     plots['integration'].setTitle("Integration Values for HS/TO Detection")
     plots['integration'].setLabel('left', "Integration", "m/s")
-    plots['integration'].setLabel('bottom', "Time", "")
+    plots['integration'].setLabel('bottom', "Time", "MM:SS.mmm")  # 시간 형식 표시
     plots['integration'].addLegend()
     plots['integration'].showGrid(x=True, y=True)
     plots['integration'].setYRange(-1, 1)
